@@ -145,7 +145,7 @@ button.danger {
   white-space: nowrap;
 }
 .ui-entity-badge[data-entity-kind="person"] { padding-left: 2px; }
-.ui-entity-badge[data-entity-kind="agreement"] {
+.ui-entity-badge[data-entity-kind="team"] {
   background: rgba(59, 130, 246, 0.1);
 }
 .ui-entity-badge[data-entity-kind="role"] {

@@ -125,7 +125,7 @@ const SovereignUI = Object.freeze({
       const icon = document.createElement("span");
       icon.className = "ui-entity-icon";
       icon.setAttribute("aria-hidden", "true");
-      icon.textContent = options.icon || (kind === "agreement" ? "▤" : "◇");
+      icon.textContent = options.icon || (kind === "team" ? "▤" : "◇");
       badge.append(icon);
     }
     if (!options.compact && options.label) {
