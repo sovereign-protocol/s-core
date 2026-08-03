@@ -758,9 +758,14 @@ Object.assign(SovereignShell, {
     topic.className = "shell-topic";
     topic.id = "shellTopicRegion";
 
-    const status = document.createElement("span");
+    // A button, not a label: it says "Open current divergences", so it has
+    // to open them. Saying where to go and then not going there is the one
+    // thing a status line must never do.
+    const status = document.createElement("button");
+    status.type = "button";
     status.id = "shellTopicStatus";
     status.className = "shell-topic-status";
+    status.onclick = () => this.openCollab();
 
     left.append(collaboration, topic, status);
 
@@ -1733,6 +1738,11 @@ Object.assign(SovereignShell, {
       "<strong>Manage Channels</strong>",
       '<button type="button" id="shellChannelManagerClose" class="shell-pane-close" aria-label="Close">&times;</button>',
       "</div>",
+      // The header is full-bleed and sticky; everything below it is inset,
+      // so no row runs into the dialog's own border. .shell-pairing-section
+      // already assumes this container exists - it drops its own horizontal
+      // padding to avoid doubling up.
+      '<div class="shell-dialog-body">',
       '<p class="shell-note">Channels belong to this session and are available to every topic.</p>',
       '<p id="shellIdentityHomeNote" class="shell-note"></p>',
       '<div id="shellManagedChannelList" class="shell-target-list"></div>',
@@ -1768,6 +1778,7 @@ Object.assign(SovereignShell, {
       '<p id="shellPairingNote" class="shell-note"></p>',
       "</div>",
       '<p id="shellChannelManagerNote" class="shell-note"></p>',
+      "</div>",
       "</dialog>",
     ].join("");
     document.body.append(...host.children);
@@ -1951,11 +1962,13 @@ Object.assign(SovereignShell, {
         channel_ref: channelRef,
       });
       await navigator.clipboard.writeText(btoa(JSON.stringify(token)));
+      // _loadSharing clears this note on success, so saying it first said it
+      // to nobody: the button looked like it had done nothing at all.
+      await this._loadSharing();
       this._note(
         "shellTargetsNote",
-        `${channelName} invite token copied.`,
+        `${channelName} invite token copied to your clipboard.`,
       );
-      await this._loadSharing();
     } catch (error) {
       this._note("shellTargetsNote", error.message);
     }
