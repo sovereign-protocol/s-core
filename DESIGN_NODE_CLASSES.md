@@ -271,8 +271,27 @@ moment they need it. That is why the child keeps the record, and it is why the
 record is the child trustee's to write.
 
 Note this is *not* justified by B's members being able to avoid the parent.
-Every member of B is party to A, necessarily - see §7 - so B's membership is
-contained in A's, not disjoint from it.
+**You are on a team only by holding a role on it, and that goes for every team
+above it.** Being on B is being on A, so B's membership is contained in A's -
+and in the membership of every parent B has, since a second parent is a second
+commitment rather than a spare route around the first. The role above may be
+the smallest "member" role there is; what matters is that it exists.
+
+Three things follow, all of them now implemented in S-Team:
+
+- A team may take a seat only if everybody already on it holds a role in the
+  parent. Otherwise accepting the seat carries them into an agreement they
+  never took a role in - and shuts the team for them, including for the
+  trustee who accepted it.
+- Losing a role above is losing the team below, for that person, derived and
+  never recorded, so it reverses itself when the role above is taken up again.
+- The roster has to say so. Invalidity above was derived only for whoever was
+  reading, so everybody else went on being shown as accepted, and a team's own
+  member list stated something untrue about them.
+
+The containment is **observable, not enforceable**: a role held on a replica
+this session cannot reach reads as unheld. The seat check therefore refuses
+and names the people it cannot place, rather than guessing.
 
 The difference from an individual's holding is therefore not that a Team needs
 somebody to speak for it - that is carried by `decided_by` on the ordinary
@@ -368,34 +387,6 @@ implemented twice.
   data on running instances, so it needs a migration or a read-compatibility
   shim, and it should be done in one pass with the trustee change rather than
   twice.
-- **Membership containment, and what today's guard actually demands.** A
-  sub-team's agreement rests on its parent's, so every member of B is party to
-  A: otherwise B1 has agreed to B without agreeing to the thing B is founded
-  on, while B - through its trustee - has agreed to A. Membership is contained,
-  not disjoint.
-
-  Being party to A is **not** the same as holding a role in A, and the code
-  currently conflates them. `_has_current_acceptance` is satisfied only by
-  holding Identity or a current accepted role, and `_holding_problem` applies
-  it to every ancestor - so today B1 must take a role in A before B is even
-  writable for them. That is stronger than the model requires, and it turns a
-  parent's role list into a membership roster.
-
-  Two ways to close it, and this document does not choose:
-  *(a)* restore an agreement-level acceptance distinct from role-holding - the
-  `agreement_decision` node that was retired in favour of
-  `agreement_role_decision`; or *(b)* make acceptance of a role in B *imply*
-  acceptance of A, by extending the reference hash over the ancestor chain.
-  Today `agreement_reference_hash` covers one agreement's own body only, so
-  under (b) it is currently incomplete: a change to A's text does not re-open
-  B1's acceptance in B, even though A's text is part of what B1 agreed to.
-
-  Either way the constraint is **observable, not enforceable**. Whether
-  somebody has accepted A lives on their replica, and may be unobservable from
-  here - so a violation can be reported, the way `unobserved` already is, but
-  it cannot be refused at the point of writing without inventing an authority
-  no client has.
-
 - **Signing.** None of this is a security boundary. Nothing in the protocol
   signs content, so "only the author may write this node" holds exactly as far
   as trusting the peers you chose to sync with - as recorded in
