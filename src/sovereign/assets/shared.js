@@ -355,13 +355,25 @@ function transitionKey(event) {
 // Where a difference stands, written from the reader's own position. Both
 // screens describe one fact, each naming its own obligation: the author is
 // told nobody has answered yet, the recipient that the decision is theirs.
+// Everyone this difference is still waiting on, not just whichever peer
+// happened to be named first. One change against three clients is one
+// situation, so the events merge - and the merged event carries every peer
+// in delivery_peer_addrs while peer_addr keeps only one of them.
+function transitionPeerLabels(info) {
+  const addrs = info?.delivery_peer_addrs?.length
+    ? info.delivery_peer_addrs
+    : [info?.peer_addr];
+  return dedupe(addrs.filter(Boolean).map(safePeerLabel)).join(", ")
+    || transitionActorLabel(info);
+}
+
 function transitionStanding(info) {
-  const peer = transitionActorLabel(info);
+  const peers = transitionPeerLabels(info);
   return {
-    in_flight: `not yet seen by ${peer}`,
-    awaiting_peer: `not yet adopted by ${peer}`,
+    in_flight: `not yet seen by ${peers}`,
+    awaiting_peer: `not yet adopted by ${peers}`,
     awaiting_me: "not yet adopted by me",
-    conflict: `also changed by ${peer}`,
+    conflict: `also changed by ${transitionActorLabel(info)}`,
   }[info?.stage] || "";
 }
 
@@ -428,7 +440,11 @@ function transitionReactionLabel(event) {
   const nouns = dedupe(changes.map((c) => c.authored_noun).filter(Boolean));
   const node = changes.find((c) => c.node_label)?.node_label || "item";
   const what = `${node.toLowerCase()} ${nouns.join(" and ") || "change"}`;
-  return event?.reaction === "rollback"
+  // Worded by who authored the change, not by which endpoint settles it.
+  // Those differ: undoing my own edit is served by adopting the version a
+  // peer still holds, which is a rollback to me however it is implemented,
+  // and "Adopt card move from me" describes the mechanism at the reader.
+  return LOCALLY_AUTHORED_TYPES.includes(event?.type) || event?.reaction === "rollback"
     ? `Take back my ${what}`
     : `Adopt ${what} from ${transitionAuthorLabel(event)}`;
 }
