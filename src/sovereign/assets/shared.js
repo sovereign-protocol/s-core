@@ -1365,7 +1365,7 @@ Object.assign(SovereignShell, {
               }];
             }
             const topics = change.applicationId === "team"
-              ? (draft.agreements || []) : (draft.boards || []);
+              ? (draft.teams || []) : (draft.boards || []);
             const tile = topics.find((entry) => entry.uuid === change.topic);
             if (tile) tile.agenda_count = Number(tile.agenda_count || 0) + 1;
             return draft;
