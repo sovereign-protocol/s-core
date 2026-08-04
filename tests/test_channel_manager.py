@@ -218,6 +218,18 @@ class ChannelManagerTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(manager, "persistence_guard"))
 
+    def test_application_collaboration_view_exposes_only_scoped_invitation_ops(self):
+        session = Session("http://a")
+        service = CollaborationService(session, ChannelManager(session))
+
+        composed = service.application_view.compose_topic_invitation("missing")
+        accepted = service.application_view.accept_topic_invitation_token({})
+
+        self.assertFalse(composed.ok)
+        self.assertEqual(composed.reason, "application topic not found")
+        self.assertFalse(accepted.ok)
+        self.assertFalse(hasattr(service.application_view, "channels_payload"))
+
     def test_compose_token_uses_registered_offers_and_identity(self):
         session = Session("http://a")
         manager = ChannelManager(session)

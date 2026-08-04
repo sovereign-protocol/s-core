@@ -111,7 +111,11 @@ def load_session_from_file(
         )
         return False
     session.load_protocol_root(root)
-    session.restore_persistence_metadata(payload.get("session", {}))
+    try:
+        session.restore_persistence_metadata(payload.get("session", {}))
+    except ValueError as exc:
+        logger(f"[persistence] invalid session metadata {path}: {exc}")
+        return False
     if root.to_dict() != protocol_payload:
         logger(f"[persistence] saving repaired session {path}")
         save_session_to_file(session, path, logger=logger)
@@ -127,9 +131,7 @@ def _session_envelope_error(payload: dict) -> str | None:
         return f"expected format '{SESSION_ENVELOPE_FORMAT}'"
     if payload.get("version") != SESSION_ENVELOPE_VERSION:
         return f"unsupported envelope version {payload.get('version')!r}"
-    if payload.get("protocol_schema_version") not in {
-        1, PROTOCOL_SCHEMA_VERSION,
-    }:
+    if payload.get("protocol_schema_version") != PROTOCOL_SCHEMA_VERSION:
         return (
             "unsupported protocol schema version "
             f"{payload.get('protocol_schema_version')!r}"

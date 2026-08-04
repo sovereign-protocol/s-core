@@ -311,6 +311,42 @@ class WithdrawsOnlyTheDetachedPublicationTests(unittest.TestCase):
 
 
 class TopicScopedPresenceTests(unittest.TestCase):
+    def test_changed_peer_profile_refreshes_from_shared_topic_presence(self):
+        with tempfile.TemporaryDirectory() as relay_root, \
+                tempfile.TemporaryDirectory() as state_dir:
+            session_a = Session("addr-a")
+            session_a.set_identity("Alice before")
+            topic = register_topic(session_a, "plan")
+            relay_a = RelayLogic(
+                session_a, relay_config(relay_root, "A", state_dir),
+            )
+            relay_a.set_scoped_topics({topic.uuid})
+
+            session_b = Session("addr-b")
+            register_notes_app(session_b)
+            relay_b = RelayLogic(
+                session_b, relay_config(relay_root, "B", state_dir),
+            )
+            relay_b.set_scoped_topics({topic.uuid})
+            relay_b.mark_topics_desired([topic.uuid])
+
+            relay_a.write_presence()
+            relay_a.publish_due_topics()
+            relay_b.poll_and_apply()
+            self.assertEqual(
+                session_b.peer_identity("relay:A").data["display_name"],
+                "Alice before",
+            )
+
+            session_a.set_identity("Alice after")
+            relay_a.write_presence()
+            relay_b.poll_and_apply()
+
+            self.assertEqual(
+                session_b.peer_identity("relay:A").data["display_name"],
+                "Alice after",
+            )
+
     def test_peer_is_offline_for_a_topic_moved_to_another_channel(self):
         with tempfile.TemporaryDirectory() as relay_root, \
                 tempfile.TemporaryDirectory() as state_dir:

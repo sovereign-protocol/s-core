@@ -425,6 +425,13 @@ class PairingTokenTests(unittest.TestCase):
                 [child.data["text"] for child in adopted.live_children()],
                 ["start"],
             )
+            self.assertEqual(
+                laptop.session.revision_verification(adopted), "valid",
+            )
+            self.assertEqual(
+                laptop.session.revision_verification(adopted.live_children()[0]),
+                "valid",
+            )
 
     def test_work_flows_back_to_the_client_that_issued_the_token(self):
         # Caught by running it: the issuer has no desired topics and no
@@ -462,6 +469,12 @@ class PairingTokenTests(unittest.TestCase):
             self.assertEqual(
                 desktop.session.protocol.index[note.uuid].data["text"],
                 "edited on the laptop",
+            )
+            self.assertEqual(
+                desktop.session.revision_verification(
+                    desktop.session.protocol.index[note.uuid],
+                ),
+                "valid",
             )
 
     def test_a_take_is_reported_so_the_cycle_persists_it(self):
@@ -797,7 +810,7 @@ class PairingTokenTests(unittest.TestCase):
         self.assertIn("/api/core/channels/stop", shared_js)
         self.assertIn("breaks previous", shared_js)
         self.assertIn("removes every topic", shared_js)
-        self.assertIn("token.token_version !== 2", shared_js)
+        self.assertIn("token.token_version !== 3", shared_js)
 
     def test_the_pairing_path_refuses_a_connection_token(self):
         with tempfile.TemporaryDirectory() as relay_root, \
@@ -805,7 +818,7 @@ class PairingTokenTests(unittest.TestCase):
             client = self.runtime(8817, "client", state_dir, relay_root)
 
             refused = client.collaboration.accept_pairing_token(
-                {"token_version": 2, "identity": {}, "topic_uuids": []},
+                {"token_version": 3, "identity": {}, "topic_uuids": []},
             )
 
             self.assertFalse(refused.ok)

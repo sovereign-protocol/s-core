@@ -647,8 +647,10 @@ class RelayLogic:
                     self.storage.write_blob(blob_id, data)
         payload = {
             "identity": self.identity,
-            # A receiver applies this only when the peer is first discovered.
-            # Later profile edits travel through the identity topic's home.
+            # A receiver refreshes this whenever its signed state changes.
+            # Invitation peers do not necessarily subscribe to each other's
+            # identity-home topics, but every shared-topic heartbeat still
+            # has to carry current names and avatars in both directions.
             "profile": profile,
             "updated_at": now_iso(),
             "poll_interval_seconds": self.poll_interval_seconds,
@@ -1544,7 +1546,12 @@ class RelayLogic:
                 profile = (presence or {}).get("profile")
                 if isinstance(profile, dict):
                     with self._session_lock:
-                        if self.session.peer_identity(peer_addr) is None:
+                        cached_profile = self.session.peer_identity(peer_addr)
+                        if (
+                            cached_profile is None
+                            or cached_profile.state_hash
+                            != profile.get("state_hash")
+                        ):
                             self.session.apply_peer_identity_snapshot(
                                 peer_addr, profile,
                             )
@@ -2705,6 +2712,9 @@ class RelayManager:
             if topic_uuids:
                 connection.mark_topics_shared(list(topic_uuids))
             connection.pair_all_topics()
+        sibling_key = self.session.issue_sibling_signing_key()
+        if sibling_key.status != "ok":
+            return sibling_key
         return SessionResult("ok", value={
             "token_version": CONNECT_TOKEN_VERSION,
             "token_kind": self.PAIRING_TOKEN_KIND,
@@ -2712,6 +2722,7 @@ class RelayManager:
             "channels": descriptors,
             "topic_uuids": sorted(topic_uuids),
             "profile": self.session.identity.to_dict(),
+            "signing_key": sibling_key.value,
         })
 
     def accept_pairing_token(self, token: dict) -> SessionResult:
@@ -2730,10 +2741,16 @@ class RelayManager:
         if not client_id or not descriptors:
             return SessionResult("error", reason="pairing token is incomplete")
         profile = token.get("profile")
-        if isinstance(profile, dict):
-            adopted = self.session.adopt_pairing_identity(profile)
-            if adopted.status != "ok":
-                return adopted
+        if not isinstance(profile, dict):
+            return SessionResult("error", reason="pairing identity is required")
+        adopted = self.session.adopt_pairing_identity(profile)
+        if adopted.status != "ok":
+            return adopted
+        installed = self.session.install_sibling_signing_key(
+            token.get("signing_key") or {},
+        )
+        if installed.status != "ok":
+            return installed
         topic_uuids = [
             str(item) for item in (token.get("topic_uuids") or []) if item
         ]

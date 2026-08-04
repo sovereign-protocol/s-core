@@ -23,6 +23,11 @@ from .protocol import (
     ProtocolNode, ProtocolState, collect_subtree_uuids,
     protocol_tree_envelope, stable_hash,
 )
+from .signing import (
+    activation_event, generate_keypair, key_id_for_public_key,
+    public_key_for_private_key,
+    resolve_key_events, revocation_event, sign_revision, verify_revision,
+)
 from .topic_registry import ApplicationRegistration, SharedTopicRegistry
 from .trace_log import TraceLogger
 from .versions import CORE_PROFILE_SCHEMA_VERSION
@@ -32,7 +37,7 @@ _LOCAL_REVISION_ORIGIN = object()
 
 _CORE_PROFILE_FIELDS = frozenset({
     "type", "name", "profile_schema_version", "identity_key",
-    "display_name", "picture", "attachments",
+    "display_name", "picture", "attachments", "signing_key_events",
 })
 
 
@@ -58,6 +63,13 @@ def _core_profile_schema_error(data: dict) -> str | None:
         return "Core profile picture must be a string"
     if not isinstance(data.get("attachments"), list):
         return "Core profile attachments must be a list"
+    _known, active, signing_error = resolve_key_events(
+        data.get("signing_key_events"),
+    )
+    if signing_error:
+        return signing_error
+    if not active:
+        return "Core profile must retain an active signing key"
     return None
 
 
@@ -168,6 +180,12 @@ class Session:
         self.trace = trace or TraceLogger.disabled()
         self._protocol = ProtocolState(author=address)
         self.protocol = ReadOnlyProtocolView(self._protocol, self.lock)
+        self._signing_keypair = generate_keypair()
+        self._creating_identity = False
+        # Identity -> last verified append-only public-key chain. Peer profile
+        # snapshots remain observable even when they branch, but a branch can
+        # never roll back a key activation or revocation already trusted here.
+        self._trusted_signing_key_events: dict[str, list[dict]] = {}
         # Persisted origin-local logical clock. Every local protocol mutation
         # receives a larger value; adopted/forwarded revisions preserve the
         # originator's value instead of consuming this counter.
@@ -425,6 +443,7 @@ class Session:
                 for addr, bindings in sorted(self.peer_topic_channel.items())
             },
             "app_metadata": copy.deepcopy(self._app_metadata),
+            "signing_key": copy.deepcopy(self._signing_keypair),
         }
 
     @_session_locked
@@ -438,6 +457,22 @@ class Session:
             and stored_revision_seq >= 0
             else 0
         )
+        stored_signing_key = metadata.get("signing_key")
+        if not isinstance(stored_signing_key, dict):
+            raise ValueError("session signing key is required")
+        try:
+            public_key = public_key_for_private_key(
+                stored_signing_key["private_key"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("session signing key is invalid") from exc
+        if (
+            stored_signing_key.get("public_key") != public_key
+            or stored_signing_key.get("key_id")
+            != key_id_for_public_key(public_key)
+        ):
+            raise ValueError("session signing key does not match its public key")
+        self._signing_keypair = copy.deepcopy(stored_signing_key)
         self._active_topic_uuids = {
             uuid for uuid in metadata.get("active_topic_uuids", [])
             if self._protocol.index.get(uuid) is not None
@@ -485,6 +520,20 @@ class Session:
             for addr, bindings in self.peer_topic_channel.items()
             if addr in self._peer_topic_sets and bindings
         }
+        profile = self._find_identity_in_tree(self._protocol.root)
+        if profile is not None:
+            known, active, error = resolve_key_events(
+                profile.data.get("signing_key_events"),
+            )
+            key_id = self._signing_keypair["key_id"]
+            if (
+                error
+                or key_id not in active
+                or known.get(key_id) != self._signing_keypair["public_key"]
+            ):
+                raise ValueError("session signing key is not active for its identity")
+            if not self._observe_identity_signing_keys(profile):
+                raise ValueError("identity signing-key chain is invalid")
 
     # Identity - a session-owned meta-topic. Any app gets "who am I"/"who is
     # this peer" for free through these, instead of reimplementing its own
@@ -503,23 +552,28 @@ class Session:
         # The shared_user_data folder only ever holds this session's own
         # identity node - no address match needed to find "mine" among
         # others, unlike the old address-keyed lookup this replaced.
-        container = self._folder(self.protocol.root, "shared_user_data")
-        for child in container.children:
-            if child.data.get("type") == "shared_user_profile":
-                return self._validated_identity(child)
-        return self.create_child(
-            container.uuid,
-            {
-                "type": "shared_user_profile",
-                "name": "public_profile",
-                "profile_schema_version": CORE_PROFILE_SCHEMA_VERSION,
-                "identity_key": str(uuid_mod.uuid4()),
-                "display_name": "",
-                "picture": "",
-                "attachments": [],
-            },
-            {},
-        ).value
+        self._creating_identity = True
+        try:
+            container = self._folder(self.protocol.root, "shared_user_data")
+            for child in container.children:
+                if child.data.get("type") == "shared_user_profile":
+                    return self._validated_identity(child)
+            return self.create_child(
+                container.uuid,
+                {
+                    "type": "shared_user_profile",
+                    "name": "public_profile",
+                    "profile_schema_version": CORE_PROFILE_SCHEMA_VERSION,
+                    "identity_key": str(uuid_mod.uuid4()),
+                    "display_name": "",
+                    "picture": "",
+                    "attachments": [],
+                    "signing_key_events": [activation_event(self._signing_keypair)],
+                },
+                {},
+            ).value
+        finally:
+            self._creating_identity = False
 
     def _validated_identity(self, node: ProtocolNode) -> ProtocolNode:
         data = dict(node.data)
@@ -584,6 +638,12 @@ class Session:
         )
         if current is not None:
             if current.uuid == incoming.uuid:
+                refreshed = self._protocol.adopt_own_fields(
+                    current.uuid, incoming, adopt_move=False,
+                )
+                if not refreshed.ok:
+                    return SessionResult("error", reason=refreshed.reason)
+                self._observe_identity_signing_keys(incoming)
                 return SessionResult("ok", value=current.uuid)
             self._protocol.remove_subtree_uuids(
                 self._protocol.root.uuid, {current.uuid},
@@ -591,6 +651,7 @@ class Session:
         adopted = self.adopt_subtree(incoming, container.uuid)
         if adopted.status != "ok":
             return adopted
+        self._observe_identity_signing_keys(incoming)
         self.trace_event(
             "session.pairing_identity_adopted",
             identity_uuid=incoming.uuid,
@@ -746,6 +807,141 @@ class Session:
             return 0
         self.local_revision_seq += 1
         return self.local_revision_seq
+
+    def _sign_local_revision(
+        self, node: ProtocolNode | None, origin: str | None, revision_seq: int,
+    ) -> None:
+        if (
+            node is not None
+            and origin
+            and node.revision_origin == origin
+            and node.revision_seq == revision_seq
+        ):
+            node.revision_parent_uuid = node.parent_uuid
+            sign_revision(node, self._signing_keypair)
+            if self.is_identity_node(node):
+                self._observe_identity_signing_keys(node)
+
+    def _observe_identity_signing_keys(self, profile: ProtocolNode) -> bool:
+        identity_key = profile.data.get("identity_key")
+        events = profile.data.get("signing_key_events")
+        if not isinstance(identity_key, str) or not identity_key:
+            return False
+        known, active, error = resolve_key_events(events)
+        if error or profile.revision_key_id not in active:
+            return False
+        public_key = known.get(profile.revision_key_id)
+        if public_key is None or not verify_revision(profile, public_key):
+            return False
+        detached = copy.deepcopy(events)
+        trusted = self._trusted_signing_key_events.get(identity_key)
+        if trusted is None:
+            self._trusted_signing_key_events[identity_key] = detached
+            return True
+        if detached == trusted:
+            return True
+        if len(detached) >= len(trusted) and detached[:len(trusted)] == trusted:
+            self._trusted_signing_key_events[identity_key] = detached
+            return True
+        # Stale and competing branches stay in peer observations, while the
+        # last verified chain remains the source of verification authority.
+        return False
+
+    @property
+    @_session_locked
+    def signing_key_id(self) -> str:
+        return self._signing_keypair["key_id"]
+
+    @_session_locked
+    def revision_verification(self, node: ProtocolNode) -> str:
+        """Verify authorship without deciding whether the author had authority."""
+        if not node.revision_origin or not node.revision_key_id or not node.revision_signature:
+            return "invalid"
+        profile = self._find_identity_in_tree(
+            self._protocol.root, node.revision_origin,
+        ) or self.find_peer_identity(node.revision_origin)
+        if profile is not None:
+            self._observe_identity_signing_keys(profile)
+        trusted_events = self._trusted_signing_key_events.get(
+            node.revision_origin,
+        )
+        if trusted_events is None:
+            return "unknown"
+        known, active, error = resolve_key_events(
+            trusted_events,
+        )
+        if error:
+            return "invalid"
+        public_key = known.get(node.revision_key_id)
+        if public_key is None:
+            return "unknown"
+        if node.revision_key_id not in active:
+            return "invalid"
+        if (
+            self.is_identity_node(node)
+            and node.data.get("signing_key_events") != trusted_events
+        ):
+            return "invalid"
+        return "valid" if verify_revision(node, public_key) else "invalid"
+
+    @_session_locked
+    def issue_sibling_signing_key(self) -> SessionResult:
+        """Authorize a distinct device key and return its private pairing bundle."""
+        profile = self.identity
+        new_key = generate_keypair()
+        data = dict(profile.data)
+        events = copy.deepcopy(data["signing_key_events"])
+        events.append(activation_event(new_key, self._signing_keypair))
+        data["signing_key_events"] = events
+        updated = self.modify(profile.uuid, data, profile.weights)
+        if updated.status != "ok":
+            return updated
+        return SessionResult("ok", value=new_key)
+
+    @_session_locked
+    def install_sibling_signing_key(self, keypair: dict) -> SessionResult:
+        """Install only a private key already authorized by the paired identity."""
+        try:
+            public_key = public_key_for_private_key(keypair["private_key"])
+            key_id = key_id_for_public_key(public_key)
+        except (KeyError, TypeError, ValueError):
+            return SessionResult("error", reason="pairing signing key is invalid")
+        if keypair.get("public_key") != public_key or keypair.get("key_id") != key_id:
+            return SessionResult("error", reason="pairing signing key does not match")
+        known, active, error = resolve_key_events(
+            self.identity.data.get("signing_key_events"),
+        )
+        if error or known.get(key_id) != public_key or key_id not in active:
+            return SessionResult("error", reason="pairing signing key is not authorized")
+        self._signing_keypair = copy.deepcopy(keypair)
+        return SessionResult("ok", value=key_id)
+
+    @_session_locked
+    def rotate_signing_key(self) -> SessionResult:
+        """Add a new active key and make it this device's signer."""
+        issued = self.issue_sibling_signing_key()
+        if issued.status != "ok":
+            return issued
+        return self.install_sibling_signing_key(issued.value)
+
+    @_session_locked
+    def revoke_signing_key(self, key_id: str) -> SessionResult:
+        """Revoke another active key; self-revocation is deliberately forbidden."""
+        if key_id == self._signing_keypair["key_id"]:
+            return SessionResult(
+                "error", reason="an active sibling key must revoke this device key",
+            )
+        profile = self.identity
+        known, active, error = resolve_key_events(
+            profile.data.get("signing_key_events"),
+        )
+        if error or key_id not in active or key_id not in known:
+            return SessionResult("error", reason="signing key is not active")
+        data = dict(profile.data)
+        events = copy.deepcopy(data["signing_key_events"])
+        events.append(revocation_event(key_id, self._signing_keypair))
+        data["signing_key_events"] = events
+        return self.modify(profile.uuid, data, profile.weights)
 
     def apply_peer_identity_snapshot(self, peer_addr: str, identity: dict) -> None:
         # A connect token carries the sender's identity inline so it's
@@ -970,6 +1166,7 @@ class Session:
         # the addr -> identity_key registry.
         if self.is_identity_node(subtree) and subtree.data.get("identity_key"):
             self.set_peer_identity_key(peer_addr, subtree.data["identity_key"])
+            self._observe_identity_signing_keys(subtree)
         cached = self._peer_perspectives.get(peer_addr)
         if cached is None:
             self._peer_perspectives[peer_addr] = subtree
@@ -1067,6 +1264,9 @@ class Session:
         target.deleted = subtree.deleted
         target.revision_origin = subtree.revision_origin
         target.revision_seq = subtree.revision_seq
+        target.revision_parent_uuid = subtree.revision_parent_uuid
+        target.revision_key_id = subtree.revision_key_id
+        target.revision_signature = subtree.revision_signature
         target.weights = subtree.weights
         target.data = subtree.data
         target.children = subtree.children
@@ -1220,6 +1420,17 @@ class Session:
     @_session_locked
     def create_child(self, parent_uuid: str, data: dict,
                      weights: dict[str, float] | None = None) -> SessionResult:
+        if (
+            not self._creating_identity
+            and not (
+                data.get("type") == "folder"
+                and data.get("name") == "shared_user_data"
+            )
+            and self._find_identity_in_tree(self._protocol.root) is None
+        ):
+            # Authorship must exist before the first application mutation.
+            # Identity's own bootstrap folder uses the guarded recursive path.
+            self.identity
         if data.get("type") == "shared_user_profile":
             profile_error = _core_profile_schema_error(data)
             if profile_error:
@@ -1232,6 +1443,7 @@ class Session:
         if not result.ok:
             return SessionResult("error", reason=result.reason)
         child = result.value
+        self._sign_local_revision(child, revision_origin, revision_seq)
         self.trace_event(
             "protocol.create_child",
             parent_uuid=parent_uuid,
@@ -1253,6 +1465,18 @@ class Session:
             profile_error = _core_profile_schema_error(data)
             if profile_error:
                 return SessionResult("error", reason=profile_error)
+            if before:
+                old_events = before.data.get("signing_key_events")
+                new_events = data.get("signing_key_events")
+                if (
+                    not isinstance(old_events, list)
+                    or not isinstance(new_events, list)
+                    or len(new_events) < len(old_events)
+                    or new_events[:len(old_events)] != old_events
+                ):
+                    return SessionResult(
+                        "error", reason="signing key events are append-only",
+                    )
         old_state_hash = before.state_hash if before else None
         origin = (
             self._local_revision_origin(data)
@@ -1264,6 +1488,8 @@ class Session:
             node_uuid, data, weights, origin, revision_seq,
         )
         after = self._protocol.index.get(node_uuid)
+        if result.ok:
+            self._sign_local_revision(after, origin, revision_seq)
         self.trace_event(
             "protocol.modify",
             node_uuid=node_uuid,
@@ -1281,12 +1507,18 @@ class Session:
     @_session_locked
     def delete(self, node_uuid: str) -> SessionResult:
         node = self._protocol.index.get(node_uuid)
+        changed_nodes = [
+            item for item in self._flatten_by_uuid(node).values()
+            if not item.deleted
+        ] if node else []
         parent_uuid = node.parent_uuid if node else None
         old_state_hash = node.state_hash if node else None
         origin = self._local_revision_origin()
         revision_seq = self._next_local_revision_seq(origin)
         result = self._protocol.delete(node_uuid, origin, revision_seq)
         if result.ok:
+            for changed in changed_nodes:
+                self._sign_local_revision(changed, origin, revision_seq)
             self.prune_deleted_nodes()
         self.trace_event(
             "protocol.delete",
@@ -1308,6 +1540,8 @@ class Session:
         if not result.ok:
             return SessionResult("error", reason=result.reason)
         clone = result.value
+        for changed in self._flatten_by_uuid(clone).values():
+            self._sign_local_revision(changed, origin, revision_seq)
         return SessionResult("ok", value=self._snapshot_node(clone))
 
     @_session_locked
@@ -1317,6 +1551,10 @@ class Session:
         result = self._protocol.move(
             source_uuid, destination_uuid, origin, revision_seq,
         )
+        if result.ok:
+            self._sign_local_revision(
+                self._protocol.index.get(source_uuid), origin, revision_seq,
+            )
         return self._operation_result(result, source_uuid)
 
     @_session_locked
@@ -1332,6 +1570,8 @@ class Session:
             origin, revision_seq,
         )
         moved = self._protocol.index.get(source_uuid)
+        if result.ok:
+            self._sign_local_revision(moved, origin, revision_seq)
         self.trace_event(
             "protocol.move_child",
             node_uuid=source_uuid,
@@ -2064,6 +2304,7 @@ class Session:
             attachment = avatar_attachment(data)
             return {
                 "uuid": uuid,
+                "identity_key": data.get("identity_key") or "",
                 "address": address,
                 "addresses": addresses,
                 "name": data.get("display_name") or "",
@@ -2101,6 +2342,21 @@ class Session:
                 profile.uuid, profile.data, addr, aliases or [addr],
             ))
         return out
+
+    @_session_locked
+    def identity_key_for_actor(self, actor_uuid: str) -> str | None:
+        """Resolve a public-profile Actor UUID to its signing identity key."""
+        normalized = str(actor_uuid or "").strip()
+        if not normalized:
+            return None
+        local = self._find_identity_in_tree(self._protocol.root)
+        if local is not None and local.uuid == normalized:
+            return str(local.data.get("identity_key") or "") or None
+        for tree in self._peer_perspectives.values():
+            candidate = self._find_in_tree(tree, normalized)
+            if self.is_identity_node(candidate):
+                return str(candidate.data.get("identity_key") or "") or None
+        return None
 
     def reaction_for_event(self, event: dict) -> str:
         """Which reaction resolves this transition: "adopt" or "rollback".

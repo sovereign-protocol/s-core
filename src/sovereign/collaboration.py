@@ -17,10 +17,12 @@ from .channel import (
 
 @dataclass(frozen=True)
 class ApplicationCollaborationView:
-    """The deliberately small, read-only collaboration surface for apps."""
+    """The deliberately small collaboration surface exposed to apps."""
 
     _network_info: Callable[[str | None], dict]
     _peer_liveness: Callable[[str, str | None], dict | None]
+    _compose_topic_invitation: Callable[[str], ChannelResult]
+    _accept_topic_invitation_token: Callable[[dict], ChannelResult]
 
     def network_info(self, topic_uuid: str | None = None) -> dict:
         return self._network_info(topic_uuid)
@@ -29,6 +31,12 @@ class ApplicationCollaborationView:
         self, peer_addr: str, topic_uuid: str | None = None,
     ) -> dict | None:
         return self._peer_liveness(peer_addr, topic_uuid)
+
+    def compose_topic_invitation(self, topic_uuid: str) -> ChannelResult:
+        return self._compose_topic_invitation(topic_uuid)
+
+    def accept_topic_invitation_token(self, token: dict) -> ChannelResult:
+        return self._accept_topic_invitation_token(token)
 
 
 class CollaborationService:
@@ -42,6 +50,8 @@ class CollaborationService:
         self.application_view = ApplicationCollaborationView(
             self.network_info,
             self.peer_liveness_for_address,
+            self.compose_topic_invitation,
+            self.accept_topic_invitation_token,
         )
 
     def network_info(self, topic_uuid: str | None = None) -> dict:
@@ -284,7 +294,52 @@ class CollaborationService:
             },
         )
 
+    def compose_topic_invitation(self, topic_uuid: str) -> ChannelResult:
+        """Compose an invitation using the topic's existing home channel.
+
+        Applications need the resulting coordinates for scoped workflows such
+        as onboarding, but never need channel inventories or implementation
+        objects. The ordinary Share flow remains the place where a home is
+        chosen.
+        """
+        topic_uuid = str(topic_uuid or "").strip()
+        topic = self.session.get_node(topic_uuid)
+        if not topic or not self.session.supports_shared_topic(topic):
+            return ChannelResult.error("application topic not found", 404)
+        topic_home = self._topic_home(topic_uuid)
+        if not topic_home:
+            return ChannelResult.error(
+                "choose a home channel for this topic before admitting anyone",
+                409,
+            )
+        identity_uuid = self.session.identity.uuid
+        identity_home = self._topic_home(identity_uuid)
+        if not identity_home:
+            return ChannelResult.error(
+                "choose a home channel for your identity before admitting anyone",
+                409,
+            )
+        topic_channel, topic_instance_id = topic_home
+        identity_channel, identity_instance_id = identity_home
+        return self._channels.compose_token(
+            (topic_uuid,),
+            {
+                topic_uuid: {
+                    "kind": topic_channel.kind,
+                    "target_id": topic_instance_id,
+                },
+                identity_uuid: {
+                    "kind": identity_channel.kind,
+                    "target_id": identity_instance_id,
+                },
+            },
+        )
+
     def accept_invitation(self, token: dict) -> ChannelResult:
+        return self._channels.accept_token(token)
+
+    def accept_topic_invitation_token(self, token: dict) -> ChannelResult:
+        """Application-facing name for accepting ordinary Core coordinates."""
         return self._channels.accept_token(token)
 
     # ---- pairing -------------------------------------------------------

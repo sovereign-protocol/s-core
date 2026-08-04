@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Applications can now compose or accept an ordinary topic invitation through
+  the narrow collaboration view. Composition uses the topic's existing home
+  channel; channel inventories and implementations remain private to Core.
+  This supports admission workflows that publish connection coordinates only
+  after an application-level decision.
+- Relay presence now refreshes a peer's signed identity profile whenever its
+  state hash changes. This fixes one-way name and avatar updates when a peer is
+  visible on a shared topic but its identity-home topic is not subscribed.
+
+- Protocol revisions now carry canonical Ed25519 authorship signatures. Core
+  identities publish an append-only device-key chain; sibling clients receive
+  distinct authorized keys, and invalid or unknown signatures remain visible
+  for governance evaluation.
+- Protocol schema 3, session envelope 2, connect token 3, and Core profile
+  schema 2 are deliberate clean breaks; older stored sessions are rejected.
 - Releasing a shared topic now withdraws its durable channel assignment even
   when the application has already removed the local topic node. This prevents
   an explicitly left topic from reappearing during the next relay poll.
