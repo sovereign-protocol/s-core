@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Releasing a shared topic now withdraws its durable channel assignment even
+  when the application has already removed the local topic node. This prevents
+  an explicitly left topic from reappearing during the next relay poll.
+
 ## 0.1.7
 
 - **Fixed: an application page without the confirm modal never rendered.**
@@ -70,6 +76,20 @@ only in its version.
 
 ## Unreleased
 
+- Add `SovereignUI.reactionControl()`: one control for answering a divergence,
+  shared by every application. A single available act reads as a button naming
+  it ("Adopt accountability creation from Ana", "Take back my card creation");
+  several become a "React" menu. The menu is Core's own element rather than
+  markup each page must carry, and its choices are read from the transition's
+  contributing events, so absence is decided by the event type rather than by
+  whether a cached peer tree happens to have arrived. Three applications had
+  copied the same menu, and a fourth had grown its own vocabulary for the same
+  acts.
+- The collaboration pane's divergence rows now carry that control beside
+  "Show", so the list of what is unsettled is also where it is settled. Two new
+  mount options: `reactNode(uuid, choice)` performs one, and `canReact(uuid)`
+  lets an application that shows several topics offer it only where it has the
+  routes to honour it.
 - Fixed optimistic Session view confirmations that refreshed application data
   without notifying subscribers to redraw when pending state changed in the
   same batch.
