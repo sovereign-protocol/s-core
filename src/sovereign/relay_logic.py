@@ -2496,7 +2496,10 @@ class RelayManager:
     @_manager_locked
     def assign_topic_target(self, topic_uuid: str, target_id: str | None) -> SessionResult:
         topic = self.session.get_node(topic_uuid)
-        if not topic or not self.session.supports_shared_topic(topic):
+        # Detaching is also the final step of removing a shared topic.  By the
+        # time the lifecycle effect is delivered, the local node may already
+        # be gone; the durable channel mapping must still be withdrawn.
+        if target_id and (not topic or not self.session.supports_shared_topic(topic)):
             return SessionResult("error", reason="application topic not found")
         if target_id and target_id not in self._target_registry():
             return SessionResult("error", reason="relay target not found")

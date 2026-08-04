@@ -194,6 +194,56 @@ button.danger {
 }
 .ui-inline-composer[hidden] { display: none; }
 
+/* The reaction control. It is deliberately quiet rather than an alarm: the
+   divergence itself is already marked wherever it sits, and this is only the
+   way out of it. Applications add their own class for placement; the shared
+   rules keep the wording, the menu and the focus behaviour identical. */
+.ui-react-button {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.35)));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.ui-react-button:hover,
+.ui-react-button:focus-visible {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+}
+.ui-react-button:disabled { cursor: default; opacity: 0.55; }
+
+.ui-reaction-menu {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: min(340px, calc(100vw - 16px));
+  padding: 4px;
+  border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.35)));
+  border-radius: 8px;
+  background: var(--surface, var(--shell-surface, #1b2027));
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+.ui-reaction-menu[hidden] { display: none; }
+.ui-reaction-menu-option {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.ui-reaction-menu-option:hover,
+.ui-reaction-menu-option:focus-visible {
+  background: var(--teal-soft);
+}
+
 .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -721,6 +771,15 @@ dialog menu .danger:not(:last-child) {
 .shell-disagreement-label {
   white-space: pre-line;
   font-size: 13px;
+}
+/* Both controls on one line under the difference they belong to, so a row
+   with a long reaction label does not push "Show" into its own column. */
+.shell-disagreement-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 .shell-avatar-preview {
   display: none;

@@ -221,6 +221,29 @@ class WithdrawsOnlyTheDetachedPublicationTests(unittest.TestCase):
             self.assertNotIn(topic.uuid, connection._state["published"])
             self.assertNotIn(topic.uuid, connection.publish_due_topics())
 
+    def test_detaching_still_withdraws_after_local_topic_was_deleted(self):
+        with tempfile.TemporaryDirectory() as relay_root, \
+                tempfile.TemporaryDirectory() as state_dir:
+            session = Session("addr-a")
+            topic = register_topic(session, "plan")
+            manager = RelayManager(session, {
+                "relay_state_directory": state_dir,
+            })
+            target_id = manager.create_target({
+                "name": "T5", "backend": "local", "root": relay_root,
+            }, verify=False).value
+            manager.assign_topic_target(topic.uuid, target_id)
+            connection = manager.connection_for_target(target_id)
+            connection.mark_topics_desired([topic.uuid])
+            session.delete(topic.uuid)
+
+            detached = manager.assign_topic_target(topic.uuid, None)
+
+            self.assertEqual(detached.status, "ok", detached.reason)
+            self.assertIsNone(manager.target_for_topic(topic.uuid))
+            self.assertNotIn(topic.uuid, connection._state["desired"])
+            self.assertNotIn(topic.uuid, connection._state["shared"])
+
     def test_detach_waits_for_an_in_flight_publication_then_removes_it(self):
         with tempfile.TemporaryDirectory() as relay_root, \
                 tempfile.TemporaryDirectory() as state_dir:

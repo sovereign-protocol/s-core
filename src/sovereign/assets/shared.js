@@ -232,6 +232,53 @@ const SovereignUI = Object.freeze({
     };
     return control;
   },
+
+  // One shape for "there is a difference here, what do you want to do about
+  // it", wherever it appears. A single available reaction is a button that
+  // names the act, because a button reading "React" hides an answer the
+  // reader could have given in one click; several become a menu, because a
+  // button cannot name four acts at once.
+  //
+  // Which nodes are offered a control stays with the application - auto-adopt
+  // rules and container-only divergences are its judgement, not Core's. This
+  // decides only what the control looks like once one is called for, and
+  // returns null when the transition leaves nothing to react to.
+  reactionControl(options = {}) {
+    const choices = reactionChoices(options.info);
+    if (!choices.length || !options.onReact) return null;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `ui-react-button ${options.className || ""}`.trim();
+    button.title = options.title || transitionLabel(options.info);
+    const react = async (choice) => {
+      button.disabled = true;
+      try {
+        await options.onReact(choice);
+      } finally {
+        // The reaction usually rebuilds the tree this button is in, so it is
+        // gone before this runs. Re-enabling matters for the case where it
+        // failed and the button is still on screen.
+        button.disabled = false;
+      }
+    };
+    if (choices.length === 1) {
+      const [only] = choices;
+      button.textContent = only.label;
+      button.onclick = (event) => {
+        event.stopPropagation();
+        react(only);
+      };
+      return button;
+    }
+    button.textContent = options.menuLabel || "React";
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-label", "React to differences");
+    button.onclick = (event) => {
+      event.stopPropagation();
+      openReactionMenu(button, choices, react);
+    };
+    return button;
+  },
 });
 
 let toastTimer = null;
@@ -449,6 +496,92 @@ function transitionReactionLabel(event) {
     : `Adopt ${what} from ${transitionAuthorLabel(event)}`;
 }
 
+// Every act available on one node, one per contributing peer. A transition
+// carries the peers that differ in `events`; an application whose grouping
+// keeps only the leading event has the record itself as its single entry.
+//
+// `absent` is read from the event type rather than from whether the node can
+// be found in a cached peer tree: absence tells the server to delete the
+// local node, and a peer root that has not arrived yet is not the same fact
+// as a peer that does not have the node.
+function reactionChoices(info) {
+  const events = (info?.events || (info ? [info] : [])).filter(
+    (event) => event
+      && event.type
+      && event.type !== "in_agreement"
+      && !["settled", "in_flight"].includes(event.stage)
+      && event.peer_addr,
+  );
+  return events.map((event) => ({
+    label: transitionReactionLabel(event),
+    action: event.reaction || "adopt",
+    peerAddr: event.peer_addr,
+    absent: event.type === "peer_missing_node",
+    event,
+  }));
+}
+
+// The menu is Core's own element rather than markup each page must carry:
+// three applications had already copied the same div, and a page that forgot
+// it lost its reactions with nothing on screen to say so.
+let uiReactionMenu = null;
+
+function closeReactionMenu() {
+  if (!uiReactionMenu) return;
+  uiReactionMenu.hidden = true;
+  uiReactionMenu.replaceChildren();
+}
+
+function openReactionMenu(anchor, choices, react) {
+  if (!uiReactionMenu) {
+    uiReactionMenu = document.createElement("div");
+    uiReactionMenu.className = "ui-reaction-menu";
+    uiReactionMenu.setAttribute("role", "menu");
+    uiReactionMenu.hidden = true;
+    document.body.append(uiReactionMenu);
+    // Bound with the menu rather than at load: a page that never opens one
+    // is left with no listeners of Core's on its document, and Core asks
+    // nothing of a page's markup before it is used.
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".ui-reaction-menu")) closeReactionMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeReactionMenu();
+    });
+    // The menu is positioned against a button that has just been measured,
+    // so anything that moves that button closes it rather than leaving it
+    // pointing somewhere else.
+    window.addEventListener("resize", closeReactionMenu);
+    window.addEventListener("scroll", closeReactionMenu, true);
+  }
+  const menu = uiReactionMenu;
+  menu.replaceChildren();
+  for (const choice of choices) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "ui-reaction-menu-option";
+    option.setAttribute("role", "menuitem");
+    option.textContent = choice.label;
+    option.onclick = async (event) => {
+      event.stopPropagation();
+      closeReactionMenu();
+      await react(choice);
+    };
+    menu.append(option);
+  }
+  menu.hidden = false;
+  const rect = anchor.getBoundingClientRect();
+  const margin = 8;
+  menu.style.left = `${Math.max(margin, Math.min(
+    rect.left, window.innerWidth - menu.offsetWidth - margin,
+  ))}px`;
+  let top = rect.bottom + 4;
+  if (top + menu.offsetHeight > window.innerHeight - margin) {
+    top = Math.max(margin, rect.top - menu.offsetHeight - 4);
+  }
+  menu.style.top = `${top}px`;
+}
+
 /*
   Sovereign host shell - the collaboration surface every application shares.
 
@@ -488,7 +621,13 @@ const SovereignShell = {
     return SovereignApi.request(path, body || {}, options);
   },
 
-  // options: { container, applicationId, topicUuid(), state(), onChanged() }
+  // options: { container, applicationId, topicUuid(), state(), onChanged(),
+  //            describeNode(uuid), revealNode(uuid), reactNode(uuid, choice),
+  //            canReact(uuid) }
+  //
+  // reactNode carries out one reaction chosen from a divergence row. The
+  // shell decides how the choice is offered - Core owns that vocabulary -
+  // and the application performs it, because only it knows its own routes.
   async mount(options) {
     this._options = options;
     const nav = this._buildHeader(options.container, options);
@@ -1247,6 +1386,8 @@ Object.assign(SovereignShell, {
       const describe = this._options.describeNode;
       where.textContent = describe ? describe(item.node_uuid) || "" : "";
       row.append(label, where);
+      const actions = document.createElement("div");
+      actions.className = "shell-disagreement-actions";
       if (this._options.revealNode) {
         const reveal = document.createElement("button");
         reveal.type = "button";
@@ -1255,8 +1396,26 @@ Object.assign(SovereignShell, {
           this.closeCollab();
           this._options.revealNode(item.node_uuid);
         };
-        row.append(reveal);
+        actions.append(reveal);
       }
+      // The list of what is unsettled is also the shortest way to settle it:
+      // the same control the node carries in the document, so the pane can be
+      // walked top to bottom without opening anything.
+      //
+      // canReact is for an application that shows several topics: the Cockpit
+      // can settle a board node and only link to a team's, and offering a
+      // button it cannot honour would be worse than offering none.
+      const reactable = this._options.canReact
+        ? this._options.canReact(item.node_uuid)
+        : true;
+      if (this._options.reactNode && reactable) {
+        const control = SovereignUI.reactionControl({
+          info: item,
+          onReact: (choice) => this._options.reactNode(item.node_uuid, choice),
+        });
+        if (control) actions.append(control);
+      }
+      if (actions.childElementCount) row.append(actions);
       list.append(row);
     }
   },
