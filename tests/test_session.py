@@ -609,14 +609,138 @@ class SessionTests(unittest.TestCase):
         profile = session.identity
 
         self.assertEqual(profile.data["type"], "shared_user_profile")
-        self.assertEqual(profile.data["profile_schema_version"], 1)
+        self.assertEqual(profile.data["profile_schema_version"], 2)
+        self.assertEqual(len(profile.data["signing_key_events"]), 1)
+        self.assertEqual(session.revision_verification(profile), "valid")
         self.assertTrue(profile.data["identity_key"])
         self.assertNotIn("email", profile.data)
         self.assertEqual(profile.data["display_name"], "")
         self.assertEqual(session.identity.uuid, profile.uuid)
-        # identity_key is generated once and stays stable across repeated
-        # access, not regenerated on every lazy-create check.
-        self.assertEqual(session.identity.data["identity_key"], profile.data["identity_key"])
+        self.assertEqual(
+            session.identity.data["identity_key"], profile.data["identity_key"],
+        )
+
+    def test_signed_revision_verifies_and_forged_content_does_not(self):
+        alice = Session("si-a")
+        alice.identity
+        revision = alice.create_child(
+            alice.protocol.root.uuid, {"type": "note", "text": "Original"}, {},
+        ).value
+        bob = Session("si-b")
+        bob.apply_peer_identity_snapshot("si-a", alice.identity.to_dict())
+
+        self.assertEqual(bob.revision_verification(revision), "valid")
+
+        payload = revision.to_dict()
+        payload["data"]["text"] = "Forged"
+        forged = ProtocolNode.from_dict(payload, repair_hashes=True)
+        self.assertEqual(bob.revision_verification(forged), "invalid")
+        bob.apply_peer_subtree("si-a-data", forged, None)
+        observed = bob.get_cached_peer_subtree("si-a-data", forged.uuid)
+        self.assertEqual(observed.data["text"], "Forged")
+        self.assertEqual(bob.revision_verification(observed), "invalid")
+        unknown_key = ProtocolNode.from_dict(revision.to_dict())
+        unknown_key.revision_key_id = "ed25519:" + "0" * 64
+        self.assertEqual(bob.revision_verification(unknown_key), "unknown")
+        self.assertEqual(Session("si-c").revision_verification(revision), "unknown")
+        self.assertEqual(
+            bob.revision_verification(ProtocolNode({"type": "note"})), "invalid",
+        )
+
+    def test_every_local_mutation_shape_refreshes_its_signature(self):
+        session = Session("si-a")
+        session.identity
+        first = session.create_child(
+            session.protocol.root.uuid, {"type": "folder", "name": "First"}, {},
+        ).value
+        second = session.create_child(
+            session.protocol.root.uuid, {"type": "folder", "name": "Second"}, {},
+        ).value
+        child = session.create_child(
+            first.uuid, {"type": "note", "text": "Initial"}, {},
+        ).value
+
+        session.modify(child.uuid, {**child.data, "text": "Changed"}, child.weights)
+        self.assertEqual(
+            session.revision_verification(session.protocol.index[child.uuid]), "valid",
+        )
+        session.move(child.uuid, second.uuid)
+        moved = session.protocol.index[child.uuid]
+        moved_topic = session.protocol.index[second.uuid]
+        self.assertEqual(moved.revision_parent_uuid, second.uuid)
+        self.assertEqual(session.revision_verification(moved), "valid")
+
+        copied = session.copy(child.uuid, first.uuid).value
+        self.assertEqual(session.revision_verification(copied), "valid")
+
+        session.note_indirect_peer_topic("si-peer", second.uuid)
+        session.apply_peer_subtree("si-peer", moved_topic, None)
+        session.delete(child.uuid)
+        deleted = session.protocol.index.get(child.uuid)
+        self.assertIsNotNone(deleted)
+        self.assertTrue(deleted.deleted)
+        self.assertEqual(session.revision_verification(deleted), "valid")
+
+    def test_rotation_and_sibling_revocation_follow_the_identity_key_chain(self):
+        alice = Session("si-a")
+        alice.identity
+        old_key_id = alice.signing_key_id
+        old_revision = alice.create_child(
+            alice.protocol.root.uuid, {"type": "note", "text": "Old"}, {},
+        ).value
+
+        rotated = alice.rotate_signing_key()
+        self.assertEqual(rotated.status, "ok")
+        self.assertNotEqual(alice.signing_key_id, old_key_id)
+        new_revision = alice.create_child(
+            alice.protocol.root.uuid, {"type": "note", "text": "New"}, {},
+        ).value
+        observer = Session("si-observer")
+        observer.apply_peer_identity_snapshot("si-a", alice.identity.to_dict())
+        self.assertEqual(observer.revision_verification(old_revision), "valid")
+        self.assertEqual(observer.revision_verification(new_revision), "valid")
+
+        pre_revocation_profile = alice.identity
+        revoked = alice.revoke_signing_key(old_key_id)
+        self.assertEqual(revoked.status, "ok")
+        observer.apply_peer_identity_snapshot("si-a", alice.identity.to_dict())
+        self.assertEqual(observer.revision_verification(old_revision), "invalid")
+        self.assertEqual(observer.revision_verification(new_revision), "valid")
+        observer.apply_peer_identity_snapshot(
+            "si-a", pre_revocation_profile.to_dict(),
+        )
+        self.assertEqual(observer.revision_verification(old_revision), "invalid")
+        self.assertEqual(
+            alice.revoke_signing_key(alice.signing_key_id).status, "error",
+        )
+        profile = alice.identity
+        data = dict(profile.data)
+        data["signing_key_events"] = data["signing_key_events"][1:]
+        self.assertEqual(
+            alice.modify(profile.uuid, data, profile.weights).status, "error",
+        )
+
+    def test_pairing_authorizes_a_distinct_device_signer(self):
+        desktop = Session("si-desktop")
+        desktop.identity
+        issued = desktop.issue_sibling_signing_key()
+        self.assertEqual(issued.status, "ok")
+        laptop = Session("si-laptop")
+        self.assertEqual(
+            laptop.adopt_pairing_identity(desktop.identity.to_dict()).status, "ok",
+        )
+        self.assertEqual(
+            laptop.install_sibling_signing_key(issued.value).status, "ok",
+        )
+        self.assertNotEqual(laptop.signing_key_id, desktop.signing_key_id)
+        revision = laptop.create_child(
+            laptop.protocol.root.uuid, {"type": "note", "text": "Laptop"}, {},
+        ).value
+        observer = Session("si-observer")
+        observer.apply_peer_identity_snapshot(
+            "si-desktop", desktop.identity.to_dict(),
+        )
+        self.assertEqual(observer.revision_verification(revision), "valid")
 
     def test_set_identity_updates_display_fields(self):
         session = Session("si-a")
@@ -721,6 +845,21 @@ class SessionTests(unittest.TestCase):
             ["http://addr-b", "relay:B"],
         )
         self.assertEqual(session.addresses_for_identity("key-nobody"), [])
+
+    def test_actor_uuid_resolves_to_the_verified_identity_key_namespace(self):
+        alice = Session("si-a")
+        bob = Session("si-b")
+        alice.apply_peer_identity_snapshot("si-b", bob.identity.to_dict())
+
+        self.assertEqual(
+            alice.identity_key_for_actor(alice.identity.uuid),
+            alice.identity.data["identity_key"],
+        )
+        self.assertEqual(
+            alice.identity_key_for_actor(bob.identity.uuid),
+            bob.identity.data["identity_key"],
+        )
+        self.assertIsNone(alice.identity_key_for_actor("unknown-actor"))
 
     def test_known_identity_resolves_profile_across_transport_addresses(self):
         session = Session("si-a")

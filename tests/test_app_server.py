@@ -227,8 +227,8 @@ class AppServerTests(unittest.TestCase):
             self.assertTrue(app_server.load_session_from_file(loaded, str(path)))
 
         self.assertEqual(payload["format"], "sovereign-session")
-        self.assertEqual(payload["version"], 1)
-        self.assertEqual(payload["protocol_schema_version"], 2)
+        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["protocol_schema_version"], 3)
         self.assertIn(child.uuid, loaded.protocol.index)
         self.assertEqual(loaded.protocol.index[child.uuid].data["name"], "saved")
         self.assertEqual(
@@ -236,7 +236,25 @@ class AppServerTests(unittest.TestCase):
             session.local_revision_seq,
         )
 
-    def test_persistence_upgrades_v1_session_with_zero_revision_sequences(self):
+    def test_persistence_restores_the_private_signer(self):
+        session = Session("http://a")
+        session.identity
+        key_id = session.signing_key_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            app_server.save_session_to_file(session, str(path))
+            loaded = Session("http://a")
+            self.assertTrue(app_server.load_session_from_file(loaded, str(path)))
+
+        self.assertEqual(loaded.signing_key_id, key_id)
+        changed = loaded.set_identity("After restart")
+        self.assertEqual(changed.status, "ok")
+        self.assertEqual(
+            loaded.revision_verification(loaded.identity), "valid",
+        )
+
+    def test_persistence_rejects_an_older_protocol_schema(self):
         session = Session("http://a")
         child = session.create_child(
             session.protocol.root.uuid,
@@ -248,29 +266,15 @@ class AppServerTests(unittest.TestCase):
             path = Path(tmp) / "state.json"
             app_server.save_session_to_file(session, str(path))
             payload = json.loads(path.read_text(encoding="utf-8"))
-            payload["protocol_schema_version"] = 1
-            payload["session"].pop("local_revision_seq")
-
-            def remove_revision_seq(node):
-                node.pop("revision_seq")
-                for nested in node.get("children", []):
-                    remove_revision_seq(nested)
-
-            remove_revision_seq(payload["protocol_root"])
+            payload["protocol_schema_version"] = 2
             path.write_text(json.dumps(payload), encoding="utf-8")
 
             loaded = Session("http://b")
-            self.assertTrue(app_server.load_session_from_file(loaded, str(path)))
-            upgraded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(app_server.load_session_from_file(
+                loaded, str(path), logger=lambda _message: None,
+            ))
 
-        self.assertEqual(loaded.local_revision_seq, 0)
-        self.assertEqual(loaded.protocol.index[child.uuid].revision_seq, 0)
-        self.assertEqual(upgraded["protocol_schema_version"], 2)
-        self.assertIn("revision_seq", upgraded["protocol_root"])
-        self.assertIn(
-            "revision_seq",
-            upgraded["protocol_root"]["children"][0],
-        )
+        self.assertNotIn(child.uuid, loaded.protocol.index)
 
     def test_persistence_roundtrip_restores_discussion_metadata(self):
         session = Session("http://a")
@@ -1114,7 +1118,7 @@ class AppServerTests(unittest.TestCase):
             )))
             payload = json.loads(response.body)
 
-            self.assertEqual(payload["token_version"], 2)
+            self.assertEqual(payload["token_version"], 3)
             self.assertEqual(payload["topic_uuids"], sorted([board.uuid, runtime.session.identity.uuid]))
             self.assertEqual([channel["type"] for channel in payload["channels"]], ["relay"])
             self.assertEqual(

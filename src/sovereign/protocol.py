@@ -95,7 +95,10 @@ class ProtocolNode:
                  weights: dict[str, float] | None = None,
                  parent_uuid: str | None = None,
                  revision_origin: str | None = None,
-                 revision_seq: int = 0):
+                 revision_seq: int = 0,
+                 revision_parent_uuid: str | None = None,
+                 revision_key_id: str | None = None,
+                 revision_signature: str | None = None):
         self.uuid = str(uuid_mod.uuid4())
         self.created_at = now_iso()
         self.updated_at = now_iso()
@@ -124,6 +127,11 @@ class ProtocolNode:
         # Forwarders preserve it unchanged; it is deliberately excluded
         # from content/state hashes, which describe semantic state only.
         self.revision_seq = revision_seq
+        self.revision_parent_uuid = (
+            parent_uuid if revision_parent_uuid is None else revision_parent_uuid
+        )
+        self.revision_key_id = revision_key_id
+        self.revision_signature = revision_signature
 
     def recompute_content_hash(self) -> str:
         return content_hash(self.data, self.weights, self.deleted)
@@ -157,6 +165,9 @@ class ProtocolNode:
             "base_parent_uuid": self.base_parent_uuid,
             "revision_origin": self.revision_origin,
             "revision_seq": self.revision_seq,
+            "revision_parent_uuid": self.revision_parent_uuid,
+            "revision_key_id": self.revision_key_id,
+            "revision_signature": self.revision_signature,
             "weights": copy.deepcopy(self.weights),
             "data": copy.deepcopy(self.data),
             "parent_uuid": self.parent_uuid,
@@ -170,6 +181,16 @@ class ProtocolNode:
             raise UnsupportedProtocolVersion(
                 "unsupported legacy field 'revision_origin_identity'; "
                 "expected 'revision_origin'"
+            )
+        required_revision_fields = {
+            "revision_origin", "revision_seq", "revision_parent_uuid",
+            "revision_key_id", "revision_signature",
+        }
+        missing_revision_fields = sorted(required_revision_fields - set(payload))
+        if missing_revision_fields:
+            raise UnsupportedProtocolVersion(
+                "protocol node is missing schema-3 revision fields: "
+                + ", ".join(missing_revision_fields)
             )
         node = cls.__new__(cls)
         node.uuid = payload["uuid"]
@@ -186,6 +207,11 @@ class ProtocolNode:
                 or revision_seq < 0):
             raise ValueError("revision_seq must be a non-negative integer")
         node.revision_seq = revision_seq
+        node.revision_parent_uuid = payload.get(
+            "revision_parent_uuid", payload.get("parent_uuid"),
+        )
+        node.revision_key_id = payload.get("revision_key_id")
+        node.revision_signature = payload.get("revision_signature")
         node.weights = copy.deepcopy(payload.get("weights", {}))
         node.data = copy.deepcopy(payload["data"])
         node.parent_uuid = payload.get("parent_uuid")
@@ -356,6 +382,9 @@ class ProtocolState:
         node.deleted = source.deleted
         node.revision_origin = source.revision_origin
         node.revision_seq = source.revision_seq
+        node.revision_parent_uuid = source.revision_parent_uuid
+        node.revision_key_id = source.revision_key_id
+        node.revision_signature = source.revision_signature
         # Preserve the source timestamp for protocol-v1 migrated revisions
         # whose sequence is zero and therefore still use the legacy fallback.
         node.updated_at = source.updated_at
@@ -449,6 +478,8 @@ class ProtocolState:
         node.revision_origin = revision_origin
         if revision_seq is not None:
             node.revision_seq = revision_seq
+        node.revision_key_id = None
+        node.revision_signature = None
 
     def clone_subtree(self, node: ProtocolNode, parent_uuid: str | None,
                       revision_origin: str | None = None,

@@ -37,6 +37,13 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported legacy field"):
             ProtocolNode.from_dict(payload)
 
+    def test_from_dict_rejects_missing_signature_evidence_fields(self):
+        payload = ProtocolNode({"name": "node"}).to_dict()
+        payload.pop("revision_signature")
+
+        with self.assertRaisesRegex(ValueError, "schema-3 revision fields"):
+            ProtocolNode.from_dict(payload)
+
     def test_new_node_starts_settled(self):
         node = ProtocolNode({"name": "node"})
 

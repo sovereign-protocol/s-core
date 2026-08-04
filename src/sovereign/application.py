@@ -33,6 +33,10 @@ class ApplicationCollaboration(Protocol):
         self, peer_addr: str, topic_uuid: str | None = None,
     ) -> dict | None: ...
 
+    def compose_topic_invitation(self, topic_uuid: str) -> Any: ...
+
+    def accept_topic_invitation_token(self, token: dict) -> Any: ...
+
 
 @dataclass(frozen=True)
 class ApplicationFacade:

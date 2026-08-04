@@ -2167,7 +2167,7 @@ Object.assign(SovereignShell, {
     // Core serializes token_version; the channel descriptor carries its own
     // descriptor_version. Testing the wrong one rejects every valid token.
     if (
-      token.token_version !== 2 ||
+      token.token_version !== 3 ||
       !Array.isArray(token.topic_uuids) ||
       !token.topic_uuids.length
     ) {
