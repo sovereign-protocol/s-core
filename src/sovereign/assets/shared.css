@@ -180,6 +180,60 @@ button.danger {
 .ui-entity-badge:hover > .ui-entity-action,
 .ui-entity-badge:focus-visible > .ui-entity-action { opacity: 1; }
 
+/* One text surface for both click-to-edit text and ordinary creation fields.
+   The host element keeps its semantic typography (heading, label, paragraph),
+   while every editable state uses the same geometry, colour and focus cue. */
+.ui-editable-text,
+.ui-text-field {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: inherit;
+  line-height: 1.4;
+  color: inherit;
+  background: transparent;
+}
+.ui-editable-text {
+  display: block;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ui-editable-text[data-editable="true"] { cursor: text; }
+.ui-editable-text[data-editable="true"]:hover,
+.ui-editable-text[data-editing="true"],
+.ui-text-field:hover {
+  border-color: var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
+  background: var(--field, var(--shell-field, rgba(127, 127, 127, 0.1)));
+}
+.ui-editable-text:focus,
+.ui-text-field:focus {
+  outline: 2px solid var(--teal, var(--shell-accent, #2f6feb));
+  outline-offset: 1px;
+  border-color: var(--teal, var(--shell-accent, #2f6feb));
+  background: var(--field, var(--shell-field, rgba(127, 127, 127, 0.1)));
+}
+.ui-editable-text:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted, var(--shell-muted, #6b7280));
+  opacity: 0.72;
+  font-weight: 400;
+  pointer-events: none;
+}
+.ui-editable-text[data-busy="true"] { opacity: 0.65; }
+.ui-text-field {
+  width: 100%;
+  border-color: var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
+  font: inherit;
+}
+.ui-text-field::placeholder {
+  color: var(--text-muted, var(--shell-muted, #6b7280));
+  opacity: 0.72;
+}
+
 /* One reusable add flow: a quiet trigger, then a properly spaced inline form.
    Apps choose where the control lives and what creation means. */
 .ui-add-control { margin: 6px 0; }
@@ -187,12 +241,14 @@ button.danger {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: min(100%, 640px);
 }
 .ui-inline-composer input {
   flex: 1 1 auto;
   min-width: 0;
 }
 .ui-inline-composer[hidden] { display: none; }
+.ui-add-form-host[hidden] { display: none; }
 
 /* The reaction control. It is deliberately quiet rather than an alarm: the
    divergence itself is already marked wherever it sits, and this is only the
@@ -606,6 +662,13 @@ dialog menu .danger:not(:last-child) {
   font-weight: 700;
   padding: 4px 6px;
   text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.shell-bar .shell-topic-title[data-editing="true"] {
+  overflow: visible;
+  text-overflow: clip;
 }
 .shell-bar .shell-topic-title:focus {
   outline: 2px solid var(--shell-accent);
@@ -1090,6 +1153,7 @@ dialog menu .danger:not(:last-child) {
 .shell-agenda-item.drop-before::before { top: -4px; }
 .shell-agenda-item.drop-after::after { bottom: -4px; }
 .shell-agenda-text { min-width: 0; overflow-wrap: anywhere; }
+.shell-agenda-text.ui-editable-text { margin: -4px 0; }
 .shell-agenda-actions {
   display: inline-flex;
   align-items: center;

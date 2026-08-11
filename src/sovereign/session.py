@@ -2265,6 +2265,23 @@ class Session:
             )
         return self.delete(item.uuid)
 
+    def update_agenda_item_text(
+        self, item_uuid: str, text: str,
+    ) -> SessionResult:
+        item = self._agenda_item(item_uuid)
+        if item is None:
+            return SessionResult("error", reason="agenda item not found")
+        if item.data.get("author") != self.identity.uuid:
+            return SessionResult(
+                "error", reason="only the topic originator can edit it",
+            )
+        normalized = str(text or "").strip()
+        if not normalized:
+            return SessionResult("error", reason="agenda text is required")
+        data = dict(item.data)
+        data["text"] = normalized
+        return self.modify(item.uuid, data, item.weights)
+
     def set_agenda_item_priority(self, item_uuid: str,
                                  priority: str | None) -> SessionResult:
         item = self._agenda_item(item_uuid)

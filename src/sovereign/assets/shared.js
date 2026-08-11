@@ -175,6 +175,127 @@ const SovereignUI = Object.freeze({
     return { section, toggle, content, setExpanded };
   },
 
+  editableText(options = {}) {
+    const element = options.element || document.createElement(options.tag || "span");
+    const existing = element._sovereignEditableText;
+    if (existing) {
+      existing.update(options);
+      return element;
+    }
+
+    let settings = {};
+    let original = "";
+    let cancelled = false;
+    let committing = false;
+    const valueFromElement = () => String(element.innerText || "")
+      .replace(/\r/g, "")
+      .replace(/\n+$/, "")
+      .trim();
+    const show = (value) => {
+      original = String(value ?? "");
+      element.textContent = original;
+      if (settings.titleFromValue) element.title = original;
+    };
+    const editable = () => (
+      settings.editable !== false && typeof settings.onCommit === "function"
+    );
+    const begin = () => {
+      if (!editable() || committing || element.isContentEditable) return;
+      cancelled = false;
+      element.contentEditable = "true";
+      element.dataset.editing = "true";
+      element.focus();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    };
+    const update = (next = {}) => {
+      settings = {...settings, ...next};
+      element.classList.add("ui-editable-text");
+      if (settings.className) element.classList.add(settings.className);
+      element.dataset.multiline = String(Boolean(settings.multiline));
+      element.dataset.editable = String(editable());
+      element.dataset.placeholder = String(settings.placeholder || "");
+      element.setAttribute(
+        "aria-label",
+        settings.ariaLabel || settings.placeholder || "Editable text",
+      );
+      if (editable()) element.tabIndex = 0;
+      else element.removeAttribute("tabindex");
+      if (
+        Object.prototype.hasOwnProperty.call(next, "value")
+        && !element.isContentEditable
+        && document.activeElement !== element
+      ) {
+        show(next.value);
+      }
+    };
+
+    element.onclick = begin;
+    element.onkeydown = (event) => {
+      if (!element.isContentEditable) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          begin();
+        }
+        return;
+      }
+      if (event.key === "Enter" && (!settings.multiline || !event.shiftKey)) {
+        event.preventDefault();
+        element.blur();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancelled = true;
+        element.textContent = original;
+        element.contentEditable = "false";
+        element.blur();
+      }
+    };
+    element.onpaste = (event) => {
+      if (!element.isContentEditable) return;
+      event.preventDefault();
+      const text = event.clipboardData?.getData("text/plain") || "";
+      document.execCommand("insertText", false, text);
+    };
+    element.onblur = async () => {
+      if (!element.isContentEditable && !element.dataset.editing) return;
+      element.contentEditable = "false";
+      delete element.dataset.editing;
+      if (cancelled) {
+        cancelled = false;
+        return;
+      }
+      const value = valueFromElement();
+      if ((!value && !settings.allowEmpty) || value === original) {
+        element.textContent = original;
+        return;
+      }
+      committing = true;
+      element.dataset.busy = "true";
+      try {
+        await settings.onCommit(value);
+        show(value);
+        if (settings.onChanged) await settings.onChanged(value);
+      } catch (error) {
+        element.textContent = original;
+        if (settings.onError) settings.onError(error);
+        else showToast(error.message, true);
+      } finally {
+        committing = false;
+        delete element.dataset.busy;
+      }
+    };
+
+    element._sovereignEditableText = { update };
+    update(options);
+    if (!Object.prototype.hasOwnProperty.call(options, "value")) {
+      show(element.textContent || "");
+    }
+    return element;
+  },
+
   addComposer(options = {}) {
     const noun = String(options.noun || "item").trim();
     const control = document.createElement("div");
@@ -187,6 +308,7 @@ const SovereignUI = Object.freeze({
     form.className = "ui-inline-composer";
     form.hidden = true;
     const input = document.createElement("input");
+    input.className = "ui-text-field";
     input.placeholder = options.placeholder || `${noun[0]?.toUpperCase() || ""}${noun.slice(1)}`;
     input.setAttribute("aria-label", options.inputLabel || input.placeholder);
     const submit = document.createElement("button");
@@ -198,15 +320,25 @@ const SovereignUI = Object.freeze({
     cancel.className = "ui-button ui-button-small";
     cancel.textContent = "Cancel";
     form.append(input, submit, cancel);
-    control.append(trigger, form);
+    const formHost = options.formHost || control;
+    if (formHost !== control) {
+      formHost.classList.add("ui-add-form-host");
+      formHost.hidden = true;
+      control.append(trigger);
+      formHost.append(form);
+    } else {
+      control.append(trigger, form);
+    }
 
     const close = () => {
       form.hidden = true;
+      if (formHost !== control) formHost.hidden = true;
       trigger.hidden = false;
       input.value = "";
     };
     const open = () => {
       trigger.hidden = true;
+      if (formHost !== control) formHost.hidden = false;
       form.hidden = false;
       input.focus();
     };
@@ -997,7 +1129,7 @@ Object.assign(SovereignShell, {
       picker = document.createElement("div");
       picker.className = "shell-topic-picker";
 
-      const title = document.createElement("input");
+      const title = document.createElement("span");
       title.className = "shell-topic-title";
 
       const toggle = iconButton('<path d="M6 9l6 6 6-6"></path>', "Switch topic", () =>
@@ -1009,34 +1141,6 @@ Object.assign(SovereignShell, {
       menu.className = "shell-topic-menu";
       picker.append(title, toggle, menu);
       region.append(picker);
-
-      title.oninput = () => this._sizeTopicTitle(title);
-      title.onkeydown = (event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          title.blur();
-        } else if (event.key === "Escape") {
-          title.value = title.dataset.original || "";
-          this._sizeTopicTitle(title);
-          title.blur();
-        }
-      };
-      title.onchange = async () => {
-        const value = title.value.trim();
-        const currentOptions = picker._options || {};
-        if (!value || !currentOptions.onRename) {
-          title.value = title.dataset.original || "";
-          this._sizeTopicTitle(title);
-          return;
-        }
-        try {
-          await currentOptions.onRename(value);
-        } catch (error) {
-          title.value = title.dataset.original || "";
-          this._sizeTopicTitle(title);
-          showToast(error.message, true);
-        }
-      };
 
       if (!this._topicPickerEventsReady) {
         document.addEventListener("keydown", (event) => {
@@ -1063,13 +1167,17 @@ Object.assign(SovereignShell, {
     const topics = options.topics || [];
     const selected = topics.find((topic) => topic.uuid === options.selectedUuid) || null;
     const title = picker.querySelector(".shell-topic-title");
-    if (document.activeElement !== title) {
-      title.value = selected?.title || "";
-      title.dataset.original = title.value;
-      this._sizeTopicTitle(title);
-    }
-    title.readOnly = !selected || !options.onRename;
-    title.setAttribute("aria-label", options.label || "Topic");
+    SovereignUI.editableText({
+      element: title,
+      value: selected?.title || "",
+      placeholder: options.label || "Topic",
+      ariaLabel: options.label || "Topic",
+      editable: Boolean(selected && options.onRename),
+      onCommit: async (value) => {
+        const currentOptions = picker._options || {};
+        if (currentOptions.onRename) await currentOptions.onRename(value);
+      },
+    });
 
     const menu = picker.querySelector(".shell-topic-menu");
     menu.replaceChildren();
@@ -1095,15 +1203,6 @@ Object.assign(SovereignShell, {
     // the picker on first use, so anything appended before that would be
     // lost with it.
     this._attachTopicActions();
-  },
-
-  _sizeTopicTitle(input) {
-    const canvas = (this._topicTitleCanvas ??= document.createElement("canvas"));
-    const context = canvas.getContext("2d");
-    const style = getComputedStyle(input);
-    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const width = context.measureText(input.value || "").width;
-    input.style.width = `${Math.ceil(Math.max(28, width) + 18)}px`;
   },
 
   setAppActions(...nodes) {
@@ -1665,6 +1764,22 @@ Object.assign(SovereignShell, {
     const text = document.createElement("span");
     text.className = "shell-agenda-text";
     text.textContent = item.data.text || "";
+    if (mine && routes?.update) {
+      SovereignUI.editableText({
+        element: text,
+        value: item.data.text || "",
+        placeholder: "Discussion topic",
+        ariaLabel: "Discussion topic",
+        onCommit: (value) => this._post(routes.update, {
+          item_uuid: item.uuid,
+          text: value,
+        }),
+        onChanged: async () => {
+          await this._changed();
+          this.openCollab();
+        },
+      });
+    }
     row.append(text);
 
     const actions = document.createElement("span");
