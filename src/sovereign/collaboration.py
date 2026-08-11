@@ -17,12 +17,23 @@ from .channel import (
 
 @dataclass(frozen=True)
 class ApplicationCollaborationView:
-    """The deliberately small collaboration surface exposed to apps."""
+    """The deliberately small collaboration surface exposed to apps.
+
+    The bridge operations name topics only. An application says "put this
+    one where that one already is" and never learns which channel that is,
+    what it costs, or who else is on it - the same rule the invitation
+    operations follow.
+    """
 
     _network_info: Callable[[str | None], dict]
     _peer_liveness: Callable[[str, str | None], dict | None]
     _compose_topic_invitation: Callable[[str], ChannelResult]
     _accept_topic_invitation_token: Callable[[dict], ChannelResult]
+    _bridge_topic_like: Callable[[str, str], ChannelResult]
+    _follow_bridged_topic: Callable[[str, str], ChannelResult]
+    _join_bridged_topic: Callable[[str, str], ChannelResult]
+    _unbridge_topic: Callable[[str], ChannelResult]
+    _topics_share_a_bridge: Callable[[str, str], bool]
 
     def network_info(self, topic_uuid: str | None = None) -> dict:
         return self._network_info(topic_uuid)
@@ -38,6 +49,33 @@ class ApplicationCollaborationView:
     def accept_topic_invitation_token(self, token: dict) -> ChannelResult:
         return self._accept_topic_invitation_token(token)
 
+    def bridge_topic_like(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        """Publish one topic wherever another is already published."""
+        return self._bridge_topic_like(topic_uuid, like_topic_uuid)
+
+    def follow_bridged_topic(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        """Consent to receive a topic over a channel already in use here."""
+        return self._follow_bridged_topic(topic_uuid, like_topic_uuid)
+
+    def join_bridged_topic(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        """Receive a bridged topic and publish this replica back on it."""
+        return self._join_bridged_topic(topic_uuid, like_topic_uuid)
+
+    def unbridge_topic(self, topic_uuid: str) -> ChannelResult:
+        """Stop publishing and receiving one topic. It becomes private."""
+        return self._unbridge_topic(topic_uuid)
+
+    def topics_share_a_bridge(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> bool:
+        return self._topics_share_a_bridge(topic_uuid, like_topic_uuid)
+
 
 class CollaborationService:
     """Session-level owner of channels, bindings and invitations."""
@@ -52,6 +90,11 @@ class CollaborationService:
             self.peer_liveness_for_address,
             self.compose_topic_invitation,
             self.accept_topic_invitation_token,
+            self.bridge_topic_like,
+            self.follow_bridged_topic,
+            self.join_bridged_topic,
+            self.unbridge_topic,
+            self.topics_share_a_bridge,
         )
 
     def network_info(self, topic_uuid: str | None = None) -> dict:
@@ -334,6 +377,89 @@ class CollaborationService:
                 },
             },
         )
+
+    # ---- bridges ---------------------------------------------------------
+    #
+    # A "bridge" is a topic's home channel, named by the topic that is on it
+    # rather than by the channel itself. Applications create topics that
+    # belong to other topics - an election belongs to the team that called
+    # it, a board to the team that keeps it - and those have to travel the
+    # same way as the thing they belong to, or they reach nobody. Without
+    # this an application could compose an invitation to a topic but never
+    # give one a home, which is the one thing needed before an invitation is
+    # possible at all.
+    #
+    # Deliberately two-sided. Putting a topic on a bridge is the publisher
+    # saying where it goes; following one is the receiver consenting to have
+    # it. Core keeps those apart everywhere else (`shared` and `desired`),
+    # and merging them here would let one client graft topics into another's
+    # tree because they happen to share a relay root.
+
+    def bridge_topic_like(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        topic = self.session.get_node(topic_uuid)
+        if not topic or not self.session.supports_shared_topic(topic):
+            return ChannelResult.error("application topic not found", 404)
+        home = self._topic_home(like_topic_uuid)
+        if not home:
+            return ChannelResult.error(
+                "the topic to follow has no home channel", 409,
+            )
+        channel, instance_id = home
+        return channel.attach_topics(
+            (topic_uuid,), {"instance_id": instance_id},
+        )
+
+    def follow_bridged_topic(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        """Consent to receive `topic_uuid` over `like_topic_uuid`'s channel.
+
+        The counterpart of accepting an invitation, for a topic whose
+        channel this client already uses: there is nothing to negotiate, so
+        there is no token, but the consent step is the same one and is not
+        skipped. The topic need not exist locally yet - that is the point.
+        """
+        home = self._topic_home(like_topic_uuid)
+        if not home:
+            return ChannelResult.error(
+                "the topic to follow has no home channel", 409,
+            )
+        channel, instance_id = home
+        follow = getattr(channel, "follow_topics", None)
+        if not callable(follow):
+            return ChannelResult.error(
+                "this channel cannot be followed without an invitation", 400,
+            )
+        return follow((topic_uuid,), instance_id)
+
+    def join_bridged_topic(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> ChannelResult:
+        """Join both sides of a topic before its first local copy arrives."""
+        home = self._topic_home(like_topic_uuid)
+        if not home:
+            return ChannelResult.error(
+                "the topic to join has no home channel", 409,
+            )
+        channel, instance_id = home
+        join = getattr(channel, "join_topics", None)
+        if not callable(join):
+            return ChannelResult.error(
+                "this channel cannot be joined without an invitation", 400,
+            )
+        return join((topic_uuid,), instance_id)
+
+    def unbridge_topic(self, topic_uuid: str) -> ChannelResult:
+        return self.release_topic(topic_uuid)
+
+    def topics_share_a_bridge(
+        self, topic_uuid: str, like_topic_uuid: str,
+    ) -> bool:
+        home = self._topic_home(topic_uuid)
+        other = self._topic_home(like_topic_uuid)
+        return bool(home and other and home == other)
 
     def accept_invitation(self, token: dict) -> ChannelResult:
         return self._channels.accept_token(token)

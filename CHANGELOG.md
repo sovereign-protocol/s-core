@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added an application-facing `join_bridged_topic` operation for taking up a
+  shared topic bidirectionally. Mailbox channels persist both receive consent
+  and the future topic assignment before the first local replica arrives.
+
 - Applications can now compose or accept an ordinary topic invitation through
   the narrow collaboration view. Composition uses the topic's existing home
   channel; channel inventories and implementations remain private to Core.

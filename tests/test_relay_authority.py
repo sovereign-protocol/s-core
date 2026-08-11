@@ -186,6 +186,26 @@ class RepublishesAfterTheRelayLosesItTests(unittest.TestCase):
 
 
 class WithdrawsOnlyTheDetachedPublicationTests(unittest.TestCase):
+    def test_joining_binds_a_topic_before_its_local_replica_arrives(self):
+        with tempfile.TemporaryDirectory() as relay_root, \
+                tempfile.TemporaryDirectory() as state_dir:
+            session = Session("addr-a")
+            manager = RelayManager(session, {
+                "relay_state_directory": state_dir,
+            })
+            target_id = manager.create_target({
+                "name": "T5", "backend": "local", "root": relay_root,
+            }, verify=False).value
+
+            joined = manager.join_topics_target(["future-topic"], target_id)
+            connection = manager.connection_for_target(target_id)
+
+            self.assertEqual(joined.status, "ok", joined.reason)
+            self.assertEqual(
+                manager.target_for_topic("future-topic"), target_id,
+            )
+            self.assertIn("future-topic", connection._state["desired"])
+
     def test_detaching_a_topic_removes_only_this_clients_publication(self):
         with tempfile.TemporaryDirectory() as relay_root, \
                 tempfile.TemporaryDirectory() as state_dir:

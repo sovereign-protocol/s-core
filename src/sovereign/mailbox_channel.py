@@ -80,12 +80,74 @@ class MailboxChannel:
             else ChannelResult.error(result.reason or "could not assign topics")
         )
 
+    def follow_topics(
+        self, topic_uuids: Iterable[str], target_id: str,
+    ) -> ChannelResult:
+        """Consent to receive these topics over a target already in use.
+
+        The token-free half of accepting an invitation. `desired` is the
+        consent gate poll_and_apply reads before grafting anything, so this
+        is what lets a topic a peer publishes reach this tree - and sharing
+        a relay root with somebody still exposes nothing without it.
+
+        No assignment is made. Where *this* client publishes a topic is its
+        own decision, and it may not own this one at all.
+        """
+        connection = self._manager.connection_for_target(str(target_id))
+        if not connection:
+            return ChannelResult.error("channel not found", 404)
+        result = connection.mark_topics_desired(
+            [str(topic) for topic in topic_uuids],
+        )
+        return (
+            ChannelResult.success(result.value)
+            if result.status == "ok"
+            else ChannelResult.error(result.reason or "could not follow topics")
+        )
+
+    def join_topics(
+        self, topic_uuids: Iterable[str], target_id: str,
+    ) -> ChannelResult:
+        """Receive topics and publish their local replicas when they arrive."""
+        result = self._manager.join_topics_target(
+            [str(topic) for topic in topic_uuids], str(target_id),
+        )
+        return (
+            ChannelResult.success(result.value)
+            if result.status == "ok"
+            else ChannelResult.error(result.reason or "could not join topics")
+        )
+
+    def unfollow_topics(
+        self, topic_uuids: Iterable[str], target_id: str,
+    ) -> ChannelResult:
+        connection = self._manager.connection_for_target(str(target_id))
+        if not connection:
+            return ChannelResult.error("channel not found", 404)
+        result = connection.unmark_topics_desired(
+            [str(topic) for topic in topic_uuids],
+        )
+        return (
+            ChannelResult.success(result.value)
+            if result.status == "ok"
+            else ChannelResult.error(
+                result.reason or "could not stop following topics",
+            )
+        )
+
     def detach_topics(self, topic_uuids: Iterable[str]) -> ChannelResult:
         for topic_uuid in topic_uuids:
-            result = self._manager.assign_topic_target(str(topic_uuid), None)
+            topic_uuid = str(topic_uuid)
+            # Stop wanting it as well as stop publishing it. Detaching left
+            # `desired` standing, so a topic taken off a channel came
+            # straight back the next time a peer published it.
+            target_id = self._manager.target_for_topic(topic_uuid)
+            if target_id:
+                self.unfollow_topics((topic_uuid,), target_id)
+            result = self._manager.assign_topic_target(topic_uuid, None)
             if result.status != "ok":
                 return ChannelResult.error(result.reason or "could not detach topic")
-            self._release_topic_peers(str(topic_uuid))
+            self._release_topic_peers(topic_uuid)
         return ChannelResult.success()
 
     def _release_topic_peers(self, topic_uuid: str) -> None:

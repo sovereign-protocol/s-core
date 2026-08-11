@@ -37,7 +37,23 @@ publishes and polls on its own schedule, not on a caller's.
 
 `ApplicationServices` deliberately exposes no channel manager. Applications
 receive a read-only collaboration view and an effect-delivery callable; channel
-configuration, invitations and topic/channel bindings are Core-only.
+configuration and the channel inventory are Core-only.
+
+The collaboration view names **topics, never channels**. Besides composing and
+accepting a topic invitation it can put one topic where another already is —
+`bridge_topic_like(topic, like_topic)` — consent to receive one that is already
+there, `follow_bridged_topic(topic, like_topic)`, stop both with
+`unbridge_topic(topic)`, and ask `topics_share_a_bridge(topic, like_topic)`.
+Applications create topics that belong to other topics — an election belongs to
+the team that called it, a board to the team that keeps it — and those have to
+travel the same way as the thing they belong to or they reach nobody. Which
+channel that is, what it costs and who else is on it stay Core's.
+
+Publishing and receiving stay **two acts**, as they are everywhere else in
+Core (`shared` and `desired`). Bridging a topic is the publisher saying where
+it goes; following one is the receiver consenting to have it. Merging them
+would let one client graft topics into another's tree because the two happen to
+share a relay root, which is exactly what the consent gate exists to prevent.
 Its `snapshot_response(builder)` binds an application view to one confirmed
 Session revision. `composite_response(snapshot_builder, observer, merger)`
 extends that contract for views decorated with live transport information:

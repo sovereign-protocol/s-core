@@ -26,16 +26,16 @@ from outside and reuses one publication identity. §7 compares them.
 **[DONE]** A token kind carrying what a client needs to take part, and
 nothing else (`RelayManager.compose_pairing_token`):
 
-| Field | What |
-|---|---|
-| `client_id` | The relay peer id every client of this user publishes under |
-| `channel` | One channel descriptor, as today |
-| `topic_uuids` | Everything the account owns, not a selected subset |
-| `profile` | The account's `shared_user_profile` subtree |
+| Field         | What                                                        |
+| ------------- | ----------------------------------------------------------- |
+| `client_id`   | The relay peer id every client of this user publishes under |
+| `channel`     | One channel descriptor, as today                            |
+| `topic_uuids` | Everything the account owns, not a selected subset          |
+| `profile`     | The account's `shared_user_profile` subtree                 |
 
 It is deliberately not a connect token with extra fields. `compose_token`
 (channel.py:138) and `accept_invitation` (204) treat what they handle as a
-relationship with *another person*; accepting a pairing token through that
+relationship with _another person_; accepting a pairing token through that
 path registers your own laptop as a stranger and then trips the
 reconnect-replace loop, which unbinds an identity's other addresses from the
 covered topics. Your laptop would evict your desktop from its own boards.
@@ -61,7 +61,7 @@ And it can read one fact from the relay: what the slot holds.
 **[DONE]** The entire sibling protocol:
 
 ```
-relay == current          →  already in agreement; nothing to do
+relay == current          →  already Aligned; nothing to do
 relay == published        →  nothing happened; publish if current differs
 relay != published
     and current == published  →  a sibling built on my published state.
@@ -109,7 +109,7 @@ classifier is no longer the thing deciding. See §6 for what remains.
 **[DONE]** `publish_due_topics` compares the topic's current state hash
 against what it last published and skips when they match. A client with
 nothing new writes no content. There is no "active client" mode to build and
-no flag to track: *activity is not a state, it is just having changes.*
+no flag to track: _activity is not a state, it is just having changes._
 
 **[DONE]** `write_presence()` runs every poll tick regardless. That is
 precisely the "I am here and I have nothing to say" signal this design wants,
@@ -156,14 +156,14 @@ so it reaches neither the participant lists nor the deletion quorum.
 
 **[DONE]** `Session.adopt_sibling_topic` carries out the take. It exists
 because per-node reconciliation deliberately does not, and session.py is
-explicit about why: *"Reconciliation is always per node. There is deliberately no
-wholesale-subtree replace."*
+explicit about why: _"Reconciliation is always per node. There is deliberately no
+wholesale-subtree replace."_
 
 `reconcile_peer_changes(addr, topic, node_is_eligible=lambda *_: True)` gets
 most of the way, but its loop acts only on `peer_made_changes` and
 `local_missing_node` (session.py:1610). It skips `peer_missing_node`, so a
 node the sibling deleted and pruned would quietly survive locally — the taken
-state would be *nearly* the sibling's, which is worse than either extreme.
+state would be _nearly_ the sibling's, which is worse than either extreme.
 A sibling take needs absence adoption in the same pass.
 
 That per-node deliberateness is right for peers and wrong here: the whole
@@ -208,30 +208,30 @@ comparator infer it.
 
 What survives is presentation. Inside the alarm, per-node classification will
 still label genuinely divergent nodes as "your sibling changed this", because
-`revision_origin` and `revision_seq` travel *with the node revision* rather
+`revision_origin` and `revision_seq` travel _with the node revision_ rather
 than the holder (`adopt_own_fields` copies "data, weights, deleted, base and
 origin", protocol.py:324) and both clients write the same origin. Two options:
 
-- **[PROPOSED]** The alarm presents *differences*, not verdicts — "these
+- **[PROPOSED]** The alarm presents _differences_, not verdicts — "these
   nodes differ" rather than "the sibling changed these" — and the mislabelling
   never surfaces.
 - **[OPEN]** Or `revision_origin` becomes per-client (`_local_revision_origin`
   returns something other than the profile `identity_key`, session.py:456),
   purely so the labels are honest. Note this costs nothing in correctness
   once the gate exists, and it does not break catch-up: an unedited local copy
-  carries its *author's* origin, so a client that is merely behind still
+  carries its _author's_ origin, so a client that is merely behind still
   matches origins and still fast-forwards.
 
 ## 7. Compared with `DESIGN_MULTI_CLIENT_IDENTITY.md`
 
-| | Siblings as peers (that doc) | Copies (this doc) |
-|---|---|---|
-| What peers see | N addresses under one `account_key` | One participant |
-| Core assumption | None; clients may edit concurrently | One human, one client at a time |
-| Reconciliation | Per node, existing classifier | Per topic, two local facts |
-| New identifier | `account_key`, above `identity_key` | None required (§6) |
-| Peer graph | Promoted into the protocol tree (§1.5, most of that doc's cost) | Carried in the token; **[OPEN]**, §8 |
-| Concurrent sibling edits | Divergence, per node | Alarm, per topic |
+|                          | Siblings as peers (that doc)                                    | Copies (this doc)                    |
+| ------------------------ | --------------------------------------------------------------- | ------------------------------------ |
+| What peers see           | N addresses under one `account_key`                             | One participant                      |
+| Core assumption          | None; clients may edit concurrently                             | One human, one client at a time      |
+| Reconciliation           | Per node, existing classifier                                   | Per topic, two local facts           |
+| New identifier           | `account_key`, above `identity_key`                             | None required (§6)                   |
+| Peer graph               | Promoted into the protocol tree (§1.5, most of that doc's cost) | Carried in the token; **[OPEN]**, §8 |
+| Concurrent sibling edits | Divergence, per node                                            | Alarm, per topic                     |
 
 That doc solves the general case and pays for it. This one takes the domain
 constraint seriously and gets a much smaller design, at the cost of being
@@ -244,7 +244,7 @@ an automation editing on a client's behalf while the person works elsewhere.
    `identities/<peer_id>/presence.json` (relay_storage.py:254, 558) — one file
    per relay identity. Clients sharing an id write the same file, so peers
    still get a correct "this account is alive" signal, but siblings cannot see
-   *each other*, which §3's "write presence to say I am connected" is for.
+   _each other_, which §3's "write presence to say I am connected" is for.
    Needs a client-scoped path beneath the id, with the id-level reading
    derived from the newest.
 
@@ -270,7 +270,7 @@ an automation editing on a client's behalf while the person works elsewhere.
    guarantee rather than inherit by accident.
 
 5. **Two clients on one machine need explicit paths.**
-   `default_relay_state_file` is keyed by relay identity *and* storage
+   `default_relay_state_file` is keyed by relay identity _and_ storage
    location — both of which siblings share by design — so two of them on one
    machine land on the same state file and share the very bookkeeping
    (`published`, `applied`) that tells them apart. `storage_file` and

@@ -111,6 +111,12 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("this._renderAgenda()", pane_refresh)
         self.assertIn("agenda.contains(document.activeElement)", pane_refresh)
 
+    def test_transition_surface_separates_all_items_from_actionable_work(self):
+        self.assertIn("In transition", SHARED_JS)
+        self.assertIn("Nothing in transition.", SHARED_JS)
+        self.assertIn("`${mine} to review`", SHARED_JS)
+        self.assertNotIn("Current divergences", SHARED_JS)
+
     def test_confirmed_snapshot_replaces_optimistic_projection_atomically(self):
         confirmation = SHARED_SESSION_JS.split(
             "async _confirm(", 1,

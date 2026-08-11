@@ -1117,7 +1117,7 @@ class RelayLogic:
     def _reconcile_sibling_publication(self, topic_uuid: str) -> bool:
         """Apply the sibling rule to whatever is in our own slot.
 
-            relay == current                         already in agreement
+            relay == current                         already Aligned
             relay == published                       nothing happened
             relay != published, current == published take it
             relay != published, current != published alarm
@@ -2553,6 +2553,39 @@ class RelayManager:
             result = self.assign_topic_target(topic_uuid, target_id)
             if result.status != "ok":
                 return result
+        return SessionResult("ok", value=normalized)
+
+    @_manager_locked
+    def join_topics_target(
+        self, topic_uuids: list[str], target_id: str,
+    ) -> SessionResult:
+        """Bind invited topics before their first local replicas arrive."""
+        normalized = list(dict.fromkeys(
+            str(item) for item in topic_uuids if item
+        ))
+        if not normalized:
+            return SessionResult("error", reason="choose at least one topic")
+        connection = self.connection_for_target(target_id)
+        if not connection:
+            return SessionResult("error", reason="relay target not found")
+        desired = connection.mark_topics_desired(normalized)
+        if desired.status != "ok":
+            return desired
+        mapping = self._topic_target_map()
+        for topic_uuid in normalized:
+            previous_id = mapping.get(topic_uuid)
+            if previous_id and previous_id != target_id:
+                previous = self.connection_for_target(previous_id)
+                if previous and previous is not connection:
+                    withdrawn = previous.withdraw_topic_publication(topic_uuid)
+                    if withdrawn.status != "ok":
+                        connection.unmark_topics_desired(normalized)
+                        return withdrawn
+                    previous.unmark_topics_shared([topic_uuid])
+                    previous.unmark_topics_desired([topic_uuid])
+            mapping[topic_uuid] = target_id
+        self.refresh_scopes()
+        self._persist_configuration()
         return SessionResult("ok", value=normalized)
 
     @_manager_locked
