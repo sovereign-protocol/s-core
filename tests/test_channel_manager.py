@@ -67,6 +67,89 @@ class _Channel:
         return {"state": "alive"}
 
 
+class _UnfollowableChannel:
+    """A managed channel with no way to be followed without a token."""
+
+    kind = "bridging"
+    descriptor_types = frozenset({"bridging"})
+
+    def __init__(self):
+        self.homes = {}
+        self.attached = []
+
+    def offer_descriptor(self, topics, options):
+        return ChannelResult.success()
+
+    def accept_descriptor(self, descriptor, invitation):
+        return ChannelResult.error("not configured")
+
+    def attach_topics(self, topics, options=None):
+        target_id = str((options or {}).get("instance_id") or "")
+        self.attached.append((tuple(topics), target_id))
+        for topic in topics:
+            self.homes[str(topic)] = target_id
+        return ChannelResult.success()
+
+    def detach_topics(self, topics):
+        for topic in topics:
+            self.homes.pop(str(topic), None)
+        return ChannelResult.success()
+
+    def management_descriptor(self):
+        return {
+            "types": [{"kind": self.kind}],
+            "instances": [
+                {"id": target_id, "ref": f"{self.kind}:{target_id}"}
+                for target_id in sorted(set(self.homes.values()))
+            ],
+        }
+
+    def topic_bindings(self, topic_uuid):
+        selected = self.homes.get(str(topic_uuid))
+        return [
+            {**instance, "in_use": instance["id"] == selected}
+            for instance in self.management_descriptor()["instances"]
+        ]
+
+    def create_instance(self, values):
+        return ChannelResult.success()
+
+    def update_instance(self, values):
+        return ChannelResult.success()
+
+    def test_instance(self, values):
+        return ChannelResult.success()
+
+    def delete_instance(self, instance_id):
+        return ChannelResult.success()
+
+    def detach_instance_topics(self, topics, instance_id):
+        return self.detach_topics(topics)
+
+    def status(self):
+        return {"kind": self.kind}
+
+    def close(self):
+        return None
+
+
+class _BridgingChannel(_UnfollowableChannel):
+    """The same, and followable: it records what it was asked to receive."""
+
+    def __init__(self):
+        super().__init__()
+        self.followed = []
+        self.joined = []
+
+    def follow_topics(self, topics, target_id):
+        self.followed.append((tuple(topics), str(target_id)))
+        return ChannelResult.success()
+
+    def join_topics(self, topics, target_id):
+        self.joined.append((tuple(topics), str(target_id)))
+        return ChannelResult.success()
+
+
 class _MinimalThirdPartyChannel:
     """Exactly the required Channel contract, with no optional capabilities."""
 
@@ -229,6 +312,110 @@ class ChannelManagerTests(unittest.TestCase):
         self.assertEqual(composed.reason, "application topic not found")
         self.assertFalse(accepted.ok)
         self.assertFalse(hasattr(service.application_view, "channels_payload"))
+        # The bridge operations name topics only. An application must not be
+        # able to reach a channel, a target or a descriptor through them.
+        for name in ("channels_payload", "set_topic_channel", "_channels"):
+            self.assertFalse(hasattr(service.application_view, name))
+
+    def test_an_application_puts_one_topic_where_another_already_is(self):
+        # An election belongs to the team that called it and has to travel
+        # the same way, or it reaches nobody. Applications could compose an
+        # invitation to a topic but never give one a home, which is the one
+        # thing needed before an invitation is possible at all.
+        session = Session("http://a")
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        service = CollaborationService(session, manager)
+        session.shared_topics.register(
+            "test-teams", {"team"}, lambda: [],
+            session.accept_topic_invitation,
+        )
+        team = session.create_child(
+            session.root_uuid(), {"type": "team", "title": "Team"}, {},
+        ).value
+        process = session.create_child(
+            session.root_uuid(), {"type": "team", "title": "Vote"}, {},
+        ).value
+        channel.homes[team.uuid] = "relay-1"
+        view = service.application_view
+
+        bridged = view.bridge_topic_like(process.uuid, team.uuid)
+
+        self.assertTrue(bridged.ok)
+        self.assertEqual(channel.attached, [((process.uuid,), "relay-1")])
+        self.assertTrue(view.topics_share_a_bridge(process.uuid, team.uuid))
+        # Nothing to copy from a topic that is nowhere, and saying so beats
+        # silently leaving the new one private.
+        orphan = view.bridge_topic_like(process.uuid, "not-a-topic")
+        self.assertFalse(orphan.ok)
+        self.assertEqual(orphan.reason, "the topic to follow has no home channel")
+
+    def test_following_a_bridged_topic_is_consent_and_assigns_nothing(self):
+        # Putting a topic on a bridge is the publisher saying where it goes;
+        # following one is the receiver consenting to have it. Core keeps
+        # those apart (`shared` and `desired`), and merging them would let
+        # one client graft topics into another's tree because they happen to
+        # share a relay root.
+        session = Session("http://a")
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        service = CollaborationService(session, manager)
+        team = session.create_child(
+            session.root_uuid(), {"type": "team", "title": "Team"}, {},
+        ).value
+        channel.homes[team.uuid] = "relay-1"
+
+        followed = service.application_view.follow_bridged_topic(
+            "a-topic-not-here-yet", team.uuid,
+        )
+
+        self.assertTrue(followed.ok)
+        self.assertEqual(
+            channel.followed, [(("a-topic-not-here-yet",), "relay-1")],
+        )
+        # A topic this client has never seen is exactly the case: consenting
+        # to receive it is what makes it arrive.
+        self.assertEqual(channel.attached, [])
+
+    def test_a_channel_that_cannot_be_followed_says_so(self):
+        session = Session("http://a")
+        manager = ChannelManager(session)
+        channel = _UnfollowableChannel()
+        manager.register(channel)
+        service = CollaborationService(session, manager)
+        team = session.create_child(
+            session.root_uuid(), {"type": "team", "title": "Team"}, {},
+        ).value
+        channel.homes[team.uuid] = "relay-1"
+
+        followed = service.application_view.follow_bridged_topic(
+            "elsewhere", team.uuid,
+        )
+
+        self.assertFalse(followed.ok)
+        self.assertIn("without an invitation", followed.reason)
+
+    def test_joining_a_bridged_topic_records_both_halves_before_it_arrives(self):
+        session = Session("http://a")
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        service = CollaborationService(session, manager)
+        team = session.create_child(
+            session.root_uuid(), {"type": "team", "title": "Team"}, {},
+        ).value
+        channel.homes[team.uuid] = "relay-1"
+
+        joined = service.application_view.join_bridged_topic(
+            "a-topic-not-here-yet", team.uuid,
+        )
+
+        self.assertTrue(joined.ok)
+        self.assertEqual(
+            channel.joined, [(("a-topic-not-here-yet",), "relay-1")],
+        )
 
     def test_compose_token_uses_registered_offers_and_identity(self):
         session = Session("http://a")

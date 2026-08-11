@@ -112,15 +112,19 @@ const SovereignUI = Object.freeze({
       "ui-entity-badge",
       options.compact ? "is-compact" : "",
       options.className || "",
-    ].filter(Boolean).join(" ");
+    ]
+      .filter(Boolean)
+      .join(" ");
     badge.dataset.entityKind = kind;
     if (options.status) badge.dataset.status = options.status;
     if (kind === "person") {
-      badge.append(this.avatar(options.person || {}, {
-        owner: options.owner,
-        self: options.self,
-        title: options.title,
-      }));
+      badge.append(
+        this.avatar(options.person || {}, {
+          owner: options.owner,
+          self: options.self,
+          title: options.title,
+        }),
+      );
     } else {
       const icon = document.createElement("span");
       icon.className = "ui-entity-icon";
@@ -168,7 +172,7 @@ const SovereignUI = Object.freeze({
     };
     toggle.onclick = () => setExpanded(section.dataset.expanded !== "true", true);
     setExpanded(Boolean(options.expanded));
-    return {section, toggle, content, setExpanded};
+    return { section, toggle, content, setExpanded };
   },
 
   addComposer(options = {}) {
@@ -299,9 +303,7 @@ function confirmAction(title, message, action) {
     // Loud, and naming what is missing. A page that asks to confirm and has
     // nowhere to do it is a mistake in that page, not something to paper over
     // by running the action unconfirmed.
-    throw new Error(
-      "confirmAction() needs the shared confirm-modal markup on this page",
-    );
+    throw new Error("confirmAction() needs the shared confirm-modal markup on this page");
   }
   document.getElementById("confirmModalTitle").textContent = title;
   document.getElementById("confirmModalMessage").textContent = message;
@@ -320,8 +322,7 @@ function confirmAction(title, message, action) {
 // with nothing in the console to say why.
 const sharedConfirmCancelBtn = document.getElementById("confirmModalCancelBtn");
 if (sharedConfirmCancelBtn) {
-  sharedConfirmCancelBtn.onclick = () =>
-    document.getElementById("confirmModal").close();
+  sharedConfirmCancelBtn.onclick = () => document.getElementById("confirmModal").close();
 }
 
 function dedupe(items) {
@@ -353,24 +354,16 @@ function transitionAuthorLabel(info) {
 // between the act and its detail, so a modification reads "Card modified by
 // me: Ana added" rather than leaving "by me" dangling off the detail.
 function authoredPhrase(info, author) {
-  const changes = (info?.events || [info]).flatMap(
-    (event) => event?.changes || [],
-  );
+  const changes = (info?.events || [info]).flatMap((event) => event?.changes || []);
   const acts = dedupe(changes.map((c) => c.authored_act).filter(Boolean));
   if (!acts.length) return "";
   const node = changes.find((c) => c.node_label)?.node_label || "Item";
-  const details = dedupe(
-    changes.map((c) => c.authored_detail).filter(Boolean),
-  );
+  const details = dedupe(changes.map((c) => c.authored_detail).filter(Boolean));
   // A suffix belongs to the verb and follows the author directly; a detail
   // is a list of what changed and sits behind a colon. "Card moved by me to
   // Doing" reads, "Card moved by me: to Doing" does not.
-  const suffixes = dedupe(
-    changes.map((c) => c.authored_suffix).filter(Boolean),
-  );
-  const head = [
-    `${node} ${acts.join(" and ")} by ${author}`, ...suffixes,
-  ].join(" ");
+  const suffixes = dedupe(changes.map((c) => c.authored_suffix).filter(Boolean));
+  const head = [`${node} ${acts.join(" and ")} by ${author}`, ...suffixes].join(" ");
   return details.length ? `${head}: ${details.join("; ")}` : head;
 }
 
@@ -407,21 +400,20 @@ function transitionKey(event) {
 // situation, so the events merge - and the merged event carries every peer
 // in delivery_peer_addrs while peer_addr keeps only one of them.
 function transitionPeerLabels(info) {
-  const addrs = info?.delivery_peer_addrs?.length
-    ? info.delivery_peer_addrs
-    : [info?.peer_addr];
-  return dedupe(addrs.filter(Boolean).map(safePeerLabel)).join(", ")
-    || transitionActorLabel(info);
+  const addrs = info?.delivery_peer_addrs?.length ? info.delivery_peer_addrs : [info?.peer_addr];
+  return dedupe(addrs.filter(Boolean).map(safePeerLabel)).join(", ") || transitionActorLabel(info);
 }
 
 function transitionStanding(info) {
   const peers = transitionPeerLabels(info);
-  return {
-    in_flight: `not yet seen by ${peers}`,
-    awaiting_peer: `not yet adopted by ${peers}`,
-    awaiting_me: "not yet adopted by me",
-    conflict: `also changed by ${transitionActorLabel(info)}`,
-  }[info?.stage] || "";
+  return (
+    {
+      in_flight: `not yet seen by ${peers}`,
+      awaiting_peer: `not yet adopted by ${peers}`,
+      awaiting_me: "not yet adopted by me",
+      conflict: `also changed by ${transitionActorLabel(info)}`,
+    }[info?.stage] || ""
+  );
 }
 
 // A conflict is the one case with two authors, so it is the one case the
@@ -439,8 +431,8 @@ function conflictPhrase(info) {
   // authored_suffix describes the peer's side here, because a divergence is
   // not locally authored; counter_suffix is mine.
   return (
-    `${node} ${acts.join(" and ")} by me${join("counter_suffix")}`
-    + `, and by ${transitionActorLabel(info)}${join("authored_suffix")}`
+    `${node} ${acts.join(" and ")} by me${join("counter_suffix")}` +
+    `, and by ${transitionActorLabel(info)}${join("authored_suffix")}`
   );
 }
 
@@ -454,22 +446,21 @@ function transitionSentence(info) {
   const authored = authoredPhrase(info, transitionAuthorLabel(info));
   if (authored) return standing ? `${authored}, ${standing}` : authored;
   const peer = transitionActorLabel(info);
-  const fallback = {
-    in_agreement: "In agreement",
-    peer_made_changes: `Changes from ${peer}`,
-    local_made_changes: `My changes not in ${peer}`,
-    local_missing_node: `Only in ${peer}`,
-    peer_missing_node: `Missing in ${peer}`,
-    divergence: `Diverged from ${peer}`,
-    in_flight: `Waiting for ${peer} to process this change`,
-  }[transitionKey(info)] || "Difference";
+  const fallback =
+    {
+      in_agreement: "Aligned",
+      peer_made_changes: `Changes from ${peer}`,
+      local_made_changes: `My changes not in ${peer}`,
+      local_missing_node: `Only in ${peer}`,
+      peer_missing_node: `Missing in ${peer}`,
+      divergence: `Diverged from ${peer}`,
+      in_flight: `Waiting for ${peer} to process this change`,
+    }[transitionKey(info)] || "Difference";
   return standing ? `${fallback}, ${standing}` : fallback;
 }
 
 function transitionLabel(info) {
-  const events = (info.events || [info]).filter(
-    (event) => event.stage !== "settled",
-  );
+  const events = (info.events || [info]).filter((event) => event.stage !== "settled");
   // Deliberately no second, peer-relative line. Saying "Card created by me"
   // and then "B: card exists only in your version" states one fact twice,
   // the second time from the far end - which is what made the old tooltips
@@ -506,11 +497,12 @@ function transitionReactionLabel(event) {
 // as a peer that does not have the node.
 function reactionChoices(info) {
   const events = (info?.events || (info ? [info] : [])).filter(
-    (event) => event
-      && event.type
-      && event.type !== "in_agreement"
-      && !["settled", "in_flight"].includes(event.stage)
-      && event.peer_addr,
+    (event) =>
+      event &&
+      event.type &&
+      event.type !== "in_agreement" &&
+      !["settled", "in_flight"].includes(event.stage) &&
+      event.peer_addr,
   );
   return events.map((event) => ({
     label: transitionReactionLabel(event),
@@ -572,9 +564,10 @@ function openReactionMenu(anchor, choices, react) {
   menu.hidden = false;
   const rect = anchor.getBoundingClientRect();
   const margin = 8;
-  menu.style.left = `${Math.max(margin, Math.min(
-    rect.left, window.innerWidth - menu.offsetWidth - margin,
-  ))}px`;
+  menu.style.left = `${Math.max(
+    margin,
+    Math.min(rect.left, window.innerWidth - menu.offsetWidth - margin),
+  )}px`;
   let top = rect.bottom + 4;
   if (top + menu.offsetHeight > window.innerHeight - margin) {
     top = Math.max(margin, rect.top - menu.offsetHeight - 4);
@@ -632,9 +625,7 @@ const SovereignShell = {
     this._options = options;
     const nav = this._buildHeader(options.container, options);
     const applications = await this.applications();
-    const current = applications.find(
-      (app) => app.application_id === options.applicationId,
-    );
+    const current = applications.find((app) => app.application_id === options.applicationId);
     if (current) {
       // The application you are in is named, not linked to itself.
       document.getElementById("shellAppName").textContent = current.display_name;
@@ -642,8 +633,7 @@ const SovereignShell = {
         const mark = document.getElementById("shellAppMark");
         mark.textContent = "";
         mark.innerHTML =
-          '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">'
-          + current.icon + "</svg>";
+          '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">' + current.icon + "</svg>";
       }
     }
     // Topic applications return through the Cockpit instead of forming a
@@ -657,8 +647,7 @@ const SovereignShell = {
       link.setAttribute("aria-label", cockpit.display_name);
       if (cockpit.icon) {
         link.innerHTML =
-          '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">'
-          + cockpit.icon + "</svg>";
+          '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">' + cockpit.icon + "</svg>";
       } else {
         link.textContent = cockpit.display_name.slice(0, 1).toUpperCase();
       }
@@ -671,10 +660,7 @@ const SovereignShell = {
       // Relay liveness changes without an application mutation. Keep the
       // header current in desktop WebViews, where there is no browser reload
       // button to force a fresh presence query.
-      this._sharingRefreshTimer = window.setInterval(
-        () => this.refreshSharingHeader(),
-        3000,
-      );
+      this._sharingRefreshTimer = window.setInterval(() => this.refreshSharingHeader(), 3000);
     }
   },
 
@@ -741,15 +727,15 @@ const SovereignShell = {
     title.textContent = alarm.title || "A topic";
     const explanation = document.createElement("span");
     explanation.textContent =
-      " was changed on another of your clients, and this client has changes"
-      + " that were not built on it. Nothing is being synced until you choose.";
+      " was changed on another of your clients, and this client has changes" +
+      " that were not built on it. Nothing is being synced until you choose.";
     text.append(title, explanation);
     if (storageFile) {
       const note = document.createElement("p");
       note.className = "shell-note";
       note.textContent =
-        "Taking the other version discards this client's copy. To keep it,"
-        + ` copy this file first: ${storageFile}`;
+        "Taking the other version discards this client's copy. To keep it," +
+        ` copy this file first: ${storageFile}`;
       text.append(note);
     }
 
@@ -757,11 +743,16 @@ const SovereignShell = {
     actions.className = "shell-sibling-alarm-actions";
     actions.append(
       this._siblingAlarmButton(
-        "Use the other client's version", alarm.topic_uuid, "take_sibling",
+        "Use the other client's version",
+        alarm.topic_uuid,
+        "take_sibling",
         "danger",
       ),
       this._siblingAlarmButton(
-        "Keep this client's version", alarm.topic_uuid, "keep_local", "primary",
+        "Keep this client's version",
+        alarm.topic_uuid,
+        "keep_local",
+        "primary",
       ),
     );
     row.append(text, actions);
@@ -846,9 +837,7 @@ const SovereignShell = {
     if (this._headerSharingPendingTopic === topic) return;
     this._headerSharingPendingTopic = topic;
     try {
-      const response = await fetch(
-        `/api/core/topics/${encodeURIComponent(topic)}/sharing`,
-      );
+      const response = await fetch(`/api/core/topics/${encodeURIComponent(topic)}/sharing`);
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload.reason || "Could not read sharing status.");
@@ -903,9 +892,7 @@ Object.assign(SovereignShell, {
     const left = document.createElement("div");
     left.className = "shell-left";
 
-    const collaboration = iconButton(
-      ICON_COLLABORATION, "Collaboration", () => this.openCollab(),
-    );
+    const collaboration = iconButton(ICON_COLLABORATION, "Collaboration", () => this.openCollab());
     collaboration.id = "shellDisagreementBtn";
     collaboration.classList.add("shell-collab-btn");
 
@@ -913,7 +900,7 @@ Object.assign(SovereignShell, {
     topic.className = "shell-topic";
     topic.id = "shellTopicRegion";
 
-    // A button, not a label: it says "Open current divergences", so it has
+    // A button, not a label: it says "Open transitions", so it has
     // to open them. Saying where to go and then not going there is the one
     // thing a status line must never do.
     const status = document.createElement("button");
@@ -1013,10 +1000,8 @@ Object.assign(SovereignShell, {
       const title = document.createElement("input");
       title.className = "shell-topic-title";
 
-      const toggle = iconButton(
-        '<path d="M6 9l6 6 6-6"></path>',
-        "Switch topic",
-        () => picker.classList.toggle("open"),
+      const toggle = iconButton('<path d="M6 9l6 6 6-6"></path>', "Switch topic", () =>
+        picker.classList.toggle("open"),
       );
       toggle.classList.add("shell-topic-switch-btn");
 
@@ -1056,18 +1041,18 @@ Object.assign(SovereignShell, {
       if (!this._topicPickerEventsReady) {
         document.addEventListener("keydown", (event) => {
           if (event.key === "Escape") {
-            document.querySelectorAll(".shell-topic-picker.open").forEach(
-              (entry) => entry.classList.remove("open"),
-            );
+            document
+              .querySelectorAll(".shell-topic-picker.open")
+              .forEach((entry) => entry.classList.remove("open"));
           }
         });
         document.addEventListener("click", (event) => {
-          const target = event.target instanceof Element
-            ? event.target : event.target.parentElement;
+          const target =
+            event.target instanceof Element ? event.target : event.target.parentElement;
           if (!target?.closest(".shell-topic-picker")) {
-            document.querySelectorAll(".shell-topic-picker.open").forEach(
-              (entry) => entry.classList.remove("open"),
-            );
+            document
+              .querySelectorAll(".shell-topic-picker.open")
+              .forEach((entry) => entry.classList.remove("open"));
           }
         });
         this._topicPickerEventsReady = true;
@@ -1076,9 +1061,7 @@ Object.assign(SovereignShell, {
 
     picker._options = options || {};
     const topics = options.topics || [];
-    const selected = topics.find(
-      (topic) => topic.uuid === options.selectedUuid,
-    ) || null;
+    const selected = topics.find((topic) => topic.uuid === options.selectedUuid) || null;
     const title = picker.querySelector(".shell-topic-title");
     if (document.activeElement !== title) {
       title.value = selected?.title || "";
@@ -1257,9 +1240,10 @@ Object.assign(SovereignShell, {
         const uploaded = await this._uploadBlob(file);
         await this._post("/api/core/profile/avatar", {
           attachment: {
-            id: (globalThis.crypto && globalThis.crypto.randomUUID)
-              ? globalThis.crypto.randomUUID()
-              : String(Date.now()) + "-" + file.name,
+            id:
+              globalThis.crypto && globalThis.crypto.randomUUID
+                ? globalThis.crypto.randomUUID()
+                : String(Date.now()) + "-" + file.name,
             role: "avatar",
             blob_id: uploaded.blob_id,
             name: file.name,
@@ -1338,8 +1322,8 @@ Object.assign(SovereignShell, {
     button.classList.toggle("has-divergence", conflicts > 0);
     button.classList.toggle("has-items", items.length > 0);
     button.title = items.length
-      ? "Open current divergences"
-      : "Everything on this topic is in agreement";
+      ? "Open transitions"
+      : "Everything on this topic is Aligned";
     if (!status) return;
     status.hidden = false;
     // Each side is told about its own obligation, so the two screens never
@@ -1355,7 +1339,7 @@ Object.assign(SovereignShell, {
       status.textContent = `${items.length} in transition`;
       status.dataset.state = "pending";
     } else {
-      status.textContent = "In agreement";
+      status.textContent = "Aligned";
       status.dataset.state = "in_agreement";
     }
     status.title = button.title;
@@ -1370,7 +1354,7 @@ Object.assign(SovereignShell, {
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "shell-note";
-      empty.textContent = "No current divergences.";
+      empty.textContent = "Nothing in transition.";
       list.append(empty);
       return;
     }
@@ -1405,9 +1389,7 @@ Object.assign(SovereignShell, {
       // canReact is for an application that shows several topics: the Cockpit
       // can settle a board node and only link to a team's, and offering a
       // button it cannot honour would be worse than offering none.
-      const reactable = this._options.canReact
-        ? this._options.canReact(item.node_uuid)
-        : true;
+      const reactable = this._options.canReact ? this._options.canReact(item.node_uuid) : true;
       if (this._options.reactNode && reactable) {
         const control = SovereignUI.reactionControl({
           info: item,
@@ -1431,7 +1413,7 @@ Object.assign(SovereignShell, {
   The collaboration pane - the same surface in every application.
 
   Sections, in the order S-Initiative established: what I want to discuss, what
-  everyone wants to discuss, what is not yet in agreement, and the settings
+  everyone wants to discuss, what is not yet Aligned, and the settings
   that govern adoption. All four are Core concepts, so all four live here and
   no application renders them itself.
 
@@ -1466,7 +1448,7 @@ Object.assign(SovereignShell, {
       "</form>",
       "</div>",
       '<div class="shell-pane-section">',
-      '<h3 id="shellNotAlignedTitle">Current divergences</h3>',
+      '<h3 id="shellNotAlignedTitle">In transition</h3>',
       '<div id="shellDisagreementList" class="shell-disagreement-list"></div>',
       "</div>",
       "</aside>",
@@ -1505,42 +1487,43 @@ Object.assign(SovereignShell, {
     const optimisticUuid = globalThis.crypto?.randomUUID
       ? `optimistic:${globalThis.crypto.randomUUID()}`
       : `optimistic:${Date.now()}:${Math.random()}`;
-    const selected = this._options.state
-      ? this._options.state().selected_topic : null;
-    const applicationId = selected?.uuid === topic
-      ? selected.application_id : "";
+    const selected = this._options.state ? this._options.state().selected_topic : null;
+    const applicationId = selected?.uuid === topic ? selected.application_id : "";
     field.value = "";
     try {
       if (sessionView && typeof sessionView.mutate === "function") {
         await sessionView.mutate({
           key: `agenda:${topic}`,
           command: "create-agenda-item",
-          arguments: {topic, text, optimisticUuid, applicationId},
+          arguments: { topic, text, optimisticUuid, applicationId },
           invalidates: ["tiles", "context"],
-          action: (context) => this._post(
-            routes.create,
-            {
-              [routes.topicKey]: topic,
-              text,
-              mutation_id: context.mutationId,
-            },
-            {signal: context.signal},
-          ),
+          action: (context) =>
+            this._post(
+              routes.create,
+              {
+                [routes.topicKey]: topic,
+                text,
+                mutation_id: context.mutationId,
+              },
+              { signal: context.signal },
+            ),
           project: (draft, change) => {
             const items = draft.agenda_items || [];
             if (!items.some((item) => item.uuid === change.optimisticUuid)) {
-              draft.agenda_items = [...items, {
-                uuid: change.optimisticUuid,
-                data: {
-                  type: "agenda_item",
-                  text: change.text,
-                  priority: null,
-                  author: draft.identity_uuid || "",
+              draft.agenda_items = [
+                ...items,
+                {
+                  uuid: change.optimisticUuid,
+                  data: {
+                    type: "agenda_item",
+                    text: change.text,
+                    priority: null,
+                    author: draft.identity_uuid || "",
+                  },
                 },
-              }];
+              ];
             }
-            const topics = change.applicationId === "team"
-              ? (draft.teams || []) : (draft.boards || []);
+            const topics = change.applicationId === "team" ? draft.teams || [] : draft.boards || [];
             const tile = topics.find((entry) => entry.uuid === change.topic);
             if (tile) tile.agenda_count = Number(tile.agenda_count || 0) + 1;
             return draft;
@@ -1581,8 +1564,7 @@ Object.assign(SovereignShell, {
 
   _agendaRow(item) {
     const state = this._options.state ? this._options.state() : {};
-    const me = state.identity_uuid
-      || (state.user_profile && state.user_profile.uuid) || "";
+    const me = state.identity_uuid || (state.user_profile && state.user_profile.uuid) || "";
     const mine = item.data.author === me;
     const routes = this._agendaRoutes();
 
@@ -1607,9 +1589,7 @@ Object.assign(SovereignShell, {
         });
       };
       const targetAt = (clientX, clientY) => {
-        const target = document.elementFromPoint(
-          clientX, clientY,
-        )?.closest(".shell-agenda-item");
+        const target = document.elementFromPoint(clientX, clientY)?.closest(".shell-agenda-item");
         document.querySelectorAll(".shell-agenda-item").forEach((entry) => {
           entry.classList.remove("drop-before", "drop-after");
         });
@@ -1696,11 +1676,13 @@ Object.assign(SovereignShell, {
     if (mine && routes) {
       const priority = document.createElement("select");
       priority.className = "shell-agenda-priority-control";
-      priority.setAttribute(
-        "aria-label", "Priority for " + (item.data.text || "agenda topic"),
-      );
-      for (const [value, label] of [["", "No priority"], ["high", "High"],
-        ["medium", "Medium"], ["low", "Low"]]) {
+      priority.setAttribute("aria-label", "Priority for " + (item.data.text || "agenda topic"));
+      for (const [value, label] of [
+        ["", "No priority"],
+        ["high", "High"],
+        ["medium", "Medium"],
+        ["low", "Low"],
+      ]) {
         const option = document.createElement("option");
         option.value = value;
         option.textContent = label;
@@ -1711,11 +1693,14 @@ Object.assign(SovereignShell, {
         row.dataset.priority = priority.value || "";
         try {
           await this._post(routes.setPriority, {
-            item_uuid: item.uuid, priority: priority.value || null,
+            item_uuid: item.uuid,
+            priority: priority.value || null,
           });
           await this._changed();
           this.openCollab();
-        } catch (error) { showToast(error.message, true); }
+        } catch (error) {
+          showToast(error.message, true);
+        }
       };
       const remove = document.createElement("button");
       remove.type = "button";
@@ -1726,15 +1711,20 @@ Object.assign(SovereignShell, {
           await this._post(routes.delete, { item_uuid: item.uuid });
           await this._changed();
           this.openCollab();
-        } catch (error) { showToast(error.message, true); }
+        } catch (error) {
+          showToast(error.message, true);
+        }
       };
       actions.append(priority, remove);
     } else {
       const priority = document.createElement("span");
       priority.className = "shell-agenda-priority-label";
-      priority.textContent = {
-        high: "High", medium: "Medium", low: "Low",
-      }[item.data.priority] || "No priority";
+      priority.textContent =
+        {
+          high: "High",
+          medium: "Medium",
+          low: "Low",
+        }[item.data.priority] || "No priority";
       actions.append(priority);
     }
 
@@ -1765,13 +1755,11 @@ Object.assign(SovereignShell, {
     if (!pane || pane.hidden) return;
 
     const agenda = document.getElementById("shellAgendaList");
-    const agendaIsActive = this._dragAgendaUuid
-      || (agenda && agenda.contains(document.activeElement));
+    const agendaIsActive =
+      this._dragAgendaUuid || (agenda && agenda.contains(document.activeElement));
     if (!agendaIsActive) this._renderAgenda();
 
-    this._renderDisagreementList(
-      document.getElementById("shellDisagreementList"),
-    );
+    this._renderDisagreementList(document.getElementById("shellDisagreementList"));
   },
 
   // Labels for the two universal modes. An application offering more supplies
@@ -1785,17 +1773,15 @@ Object.assign(SovereignShell, {
 
   _autoAdoptControl() {
     const configured = this._options.autoAdoptRoute;
-    const route = typeof configured === "function"
-      ? configured() : configured;
+    const route = typeof configured === "function" ? configured() : configured;
     const topic = this._topic();
     if (!route || !topic) return null;
     const state = this._options.state ? this._options.state() : {};
     const modes = state.auto_adopt_modes || ["always", "never"];
-    const labels = Object.assign(
-      {}, this.AUTO_ADOPT_LABELS, this._options.autoAdoptLabels || {},
-    );
+    const labels = Object.assign({}, this.AUTO_ADOPT_LABELS, this._options.autoAdoptLabels || {});
     const descriptions = Object.assign(
-      {}, this.AUTO_ADOPT_DESCRIPTIONS,
+      {},
+      this.AUTO_ADOPT_DESCRIPTIONS,
       this._options.autoAdoptDescriptions || {},
     );
 
@@ -1836,10 +1822,13 @@ Object.assign(SovereignShell, {
       renderSelection();
       try {
         await this._post(route.path, {
-          [route.topicKey]: topic, mode: select.value,
+          [route.topicKey]: topic,
+          mode: select.value,
         });
         await this._changed();
-      } catch (error) { showToast(error.message, true); }
+      } catch (error) {
+        showToast(error.message, true);
+      }
     };
     row.append(indicator, select);
     wrap.append(row, description);
@@ -1850,9 +1839,7 @@ Object.assign(SovereignShell, {
   openCollab() {
     this._ensureCollabPane();
     this._renderAgenda();
-    this._renderDisagreementList(
-      document.getElementById("shellDisagreementList"),
-    );
+    this._renderDisagreementList(document.getElementById("shellDisagreementList"));
     document.getElementById("shellCollabOverlay").hidden = false;
     document.getElementById("shellCollabPane").hidden = false;
     // The page insets beside the pane instead of being covered by it.
@@ -1923,7 +1910,7 @@ Object.assign(SovereignShell, {
       '<div id="shellManagedChannelList" class="shell-target-list"></div>',
       '<button type="button" id="shellAddChannelBtn" class="ui-button">+ Add channel</button>',
       '<fieldset id="shellChannelForm" class="shell-target-form" hidden>',
-      '<legend>Add channel</legend>',
+      "<legend>Add channel</legend>",
       '<label for="shellChannelType">Channel type</label>',
       '<select id="shellChannelType"></select>',
       '<div id="shellChannelFields" class="shell-target-form-full"></div>',
@@ -1941,15 +1928,15 @@ Object.assign(SovereignShell, {
       // actions those read as variations of one thing.
       '<div class="shell-pane-section shell-pairing-section">',
       "<h3>My other clients</h3>",
-      '<p class="shell-note">A paired client is not another person: it'
-      + " publishes as you, over the channels above, and everything you own"
-      + " follows it.</p>",
+      '<p class="shell-note">A paired client is not another person: it' +
+        " publishes as you, over the channels above, and everything you own" +
+        " follows it.</p>",
       '<button type="button" id="shellPairClientBtn">Generate pairing token</button>',
-      '<p class="shell-note">Paste it into the other client under'
-      + " &quot;Use a token&quot;. Pair a client that has nothing on it yet -"
-      + " content already there cannot be merged, only chosen between."
-      + " Generating a token again later adds any new channels to the ones"
-      + " the paired client already has.</p>",
+      '<p class="shell-note">Paste it into the other client under' +
+        " &quot;Use a token&quot;. Pair a client that has nothing on it yet -" +
+        " content already there cannot be merged, only chosen between." +
+        " Generating a token again later adds any new channels to the ones" +
+        " the paired client already has.</p>",
       '<p id="shellPairingNote" class="shell-note"></p>',
       "</div>",
       '<p id="shellChannelManagerNote" class="shell-note"></p>',
@@ -1972,8 +1959,7 @@ Object.assign(SovereignShell, {
     document.getElementById("shellTestChannelBtn").onclick = () => this._testChannelForm();
     document.getElementById("shellSaveChannelBtn").onclick = () => this._saveChannel();
     document.getElementById("shellConnectBtn").onclick = () => this._connect();
-    document.getElementById("shellPairClientBtn").onclick = () =>
-      this._copyPairingToken();
+    document.getElementById("shellPairClientBtn").onclick = () => this._copyPairingToken();
   },
 
   async _copyPairingToken() {
@@ -1982,8 +1968,8 @@ Object.assign(SovereignShell, {
       await navigator.clipboard.writeText(btoa(JSON.stringify(token)));
       this._note(
         "shellPairingNote",
-        "Pairing token copied. It carries this client's identity and every"
-        + " topic you own, so treat it like the key to everything.",
+        "Pairing token copied. It carries this client's identity and every" +
+          " topic you own, so treat it like the key to everything.",
       );
     } catch (error) {
       this._note("shellPairingNote", error.message);
@@ -1996,8 +1982,8 @@ Object.assign(SovereignShell, {
       field.value = "";
       this._note(
         "shellTokenNote",
-        "Paired. This client now publishes as the same participant as the"
-        + " one that issued the token.",
+        "Paired. This client now publishes as the same participant as the" +
+          " one that issued the token.",
       );
       await this._changed();
       this._toggleTokenForm(false);
@@ -2023,9 +2009,7 @@ Object.assign(SovereignShell, {
     this._ensureConnectionsPane();
 
     const autoAdoptSection = document.getElementById("shellConnAutoAdopt");
-    const autoAdoptControl = document.getElementById(
-      "shellConnAutoAdoptControl",
-    );
+    const autoAdoptControl = document.getElementById("shellConnAutoAdoptControl");
     autoAdoptControl.replaceChildren();
     const adopt = this._autoAdoptControl();
     if (adopt) autoAdoptControl.append(adopt);
@@ -2050,16 +2034,11 @@ Object.assign(SovereignShell, {
       this._sharing = { people: [], channels: [] };
       this._renderPeersList();
       this._renderConnTargets();
-      this._note(
-        "shellTargetsNote",
-        "No topic yet. Paste an invite token to join one.",
-      );
+      this._note("shellTargetsNote", "No topic yet. Paste an invite token to join one.");
       return;
     }
     try {
-      const response = await fetch(
-        `/api/core/topics/${encodeURIComponent(topic)}/sharing`,
-      );
+      const response = await fetch(`/api/core/topics/${encodeURIComponent(topic)}/sharing`);
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.reason || "Could not read sharing.");
       this._sharing = payload;
@@ -2094,8 +2073,8 @@ Object.assign(SovereignShell, {
       const row = document.createElement("div");
       row.className = "shell-peer-row";
       const avatar = document.createElement("span");
-      avatar.className = "header-avatar shell-peer-avatar "
-        + (online ? "status-online" : "status-offline");
+      avatar.className =
+        "header-avatar shell-peer-avatar " + (online ? "status-online" : "status-offline");
       if (info.picture) {
         avatar.style.backgroundImage = 'url("' + info.picture + '")';
       } else {
@@ -2107,8 +2086,8 @@ Object.assign(SovereignShell, {
       name.textContent = info.name || addr;
       const status = document.createElement("span");
       status.className = "shell-note shell-peer-status";
-      status.textContent = (online ? "Online" : "Offline")
-        + (info.channel ? " (" + info.channel + ")" : "");
+      status.textContent =
+        (online ? "Online" : "Offline") + (info.channel ? " (" + info.channel + ")" : "");
       row.append(avatar, name, status);
       list.append(row);
     }
@@ -2117,10 +2096,10 @@ Object.assign(SovereignShell, {
   async _setTopicChannel(channelRef, action) {
     const topic = this._topic();
     if (!topic) throw new Error("Select a topic first.");
-    await this._post(
-      `/api/core/topics/${encodeURIComponent(topic)}/channels`,
-      { channel_ref: channelRef, action },
-    );
+    await this._post(`/api/core/topics/${encodeURIComponent(topic)}/channels`, {
+      channel_ref: channelRef,
+      action,
+    });
     await this._changed();
     await this._loadSharing();
   },
@@ -2140,10 +2119,7 @@ Object.assign(SovereignShell, {
       // _loadSharing clears this note on success, so saying it first said it
       // to nobody: the button looked like it had done nothing at all.
       await this._loadSharing();
-      this._note(
-        "shellTargetsNote",
-        `${channelName} invite token copied to your clipboard.`,
-      );
+      this._note("shellTargetsNote", `${channelName} invite token copied to your clipboard.`);
     } catch (error) {
       this._note("shellTargetsNote", error.message);
     }
@@ -2230,56 +2206,52 @@ Object.assign(SovereignShell, {
       identity.append(name, kind);
       const statuses = document.createElement("div");
       statuses.className = "shell-channel-statuses";
-      statuses.append(this._targetStatus(
-        channel.available ? "Available" : "Unavailable",
-        channel.available ? "is-available" : "",
-      ));
+      statuses.append(
+        this._targetStatus(
+          channel.available ? "Available" : "Unavailable",
+          channel.available ? "is-available" : "",
+        ),
+      );
       if (channel.in_use) {
         statuses.append(this._targetStatus("In use", "is-in-use"));
       }
       const actions = document.createElement("div");
       actions.className = "shell-target-actions";
       if (channel.in_use) {
-        actions.append(this._channelAction(
-          "Stop using",
-          async () => {
+        actions.append(
+          this._channelAction("Stop using", async () => {
             try {
               await this._setTopicChannel(channel.ref, "stop");
-              this._note(
-                "shellTargetsNote",
-                `${channel.name} is no longer used for this topic.`,
-              );
+              this._note("shellTargetsNote", `${channel.name} is no longer used for this topic.`);
             } catch (error) {
               this._note("shellTargetsNote", error.message);
             }
-          },
-        ));
+          }),
+        );
       } else {
-        actions.append(this._channelAction(
-          "Use for this topic",
-          async () => {
+        actions.append(
+          this._channelAction("Use for this topic", async () => {
             try {
               await this._setTopicChannel(channel.ref, "use");
-              this._note(
-                "shellTargetsNote",
-                `${channel.name} is now in use for this topic.`,
-              );
+              this._note("shellTargetsNote", `${channel.name} is now in use for this topic.`);
             } catch (error) {
               this._note("shellTargetsNote", error.message);
             }
-          },
-        ));
+          }),
+        );
       }
       // Only for a channel this topic is actually on. Inviting someone to a
       // channel is a decision to publish here, and that decision is the
       // "Use for this topic" above - taken first, and revocable from the
       // same row.
       if (channel.in_use) {
-        actions.append(this._channelAction(
-          "Get invitation",
-          () => this._copyToken(channel.ref, channel.name),
-          "primary",
-        ));
+        actions.append(
+          this._channelAction(
+            "Get invitation",
+            () => this._copyToken(channel.ref, channel.name),
+            "primary",
+          ),
+        );
       }
       row.append(identity, statuses, actions);
       list.append(row);
@@ -2317,9 +2289,7 @@ Object.assign(SovereignShell, {
     const list = document.getElementById("shellManagedChannelList");
     list.replaceChildren();
     const homeRef = this._channelCatalog.identity_channel_ref || "";
-    const home = (this._channelCatalog.channels || []).find(
-      (channel) => channel.ref === homeRef,
-    );
+    const home = (this._channelCatalog.channels || []).find((channel) => channel.ref === homeRef);
     this._note(
       "shellIdentityHomeNote",
       home
@@ -2340,10 +2310,12 @@ Object.assign(SovereignShell, {
       identity.append(name, kind);
       const status = document.createElement("div");
       status.className = "shell-channel-statuses";
-      status.append(this._targetStatus(
-        channel.available ? "Available" : "Unavailable",
-        channel.available ? "is-available" : "",
-      ));
+      status.append(
+        this._targetStatus(
+          channel.available ? "Available" : "Unavailable",
+          channel.available ? "is-available" : "",
+        ),
+      );
       if (channel.identity_home) {
         status.append(this._targetStatus("Identity home", "is-in-use"));
       }
@@ -2351,17 +2323,14 @@ Object.assign(SovereignShell, {
       if (assigned.length) {
         const usage = document.createElement("span");
         usage.className = "shell-note";
-        usage.textContent = `Used by: ${assigned.map(
-          (topic) => topic.title,
-        ).join(", ")}`;
+        usage.textContent = `Used by: ${assigned.map((topic) => topic.title).join(", ")}`;
         identity.append(usage);
       }
       const actions = document.createElement("div");
       actions.className = "shell-target-actions";
       if (!channel.identity_home) {
-        actions.append(this._channelAction(
-          "Use for my identity",
-          () => {
+        actions.append(
+          this._channelAction("Use for my identity", () => {
             const move = () => this._setIdentityHome(channel);
             if (!homeRef) {
               move();
@@ -2369,38 +2338,44 @@ Object.assign(SovereignShell, {
             }
             confirmAction(
               `Move your identity home to ${channel.name}?`,
-              "People invited through the previous identity channel will"
-              + " no longer see current profile data.",
+              "People invited through the previous identity channel will" +
+                " no longer see current profile data.",
               move,
             );
-          },
-        ));
+          }),
+        );
       }
       if (assigned.length) {
-        actions.append(this._channelAction(
-          "Stop all use",
-          () => confirmAction(
-            `Stop all use of ${channel.name}?`,
-            "This removes the identity home and every topic assignment."
-              + " The channel remains available.",
-            () => this._stopChannel(channel),
+        actions.append(
+          this._channelAction(
+            "Stop all use",
+            () =>
+              confirmAction(
+                `Stop all use of ${channel.name}?`,
+                "This removes the identity home and every topic assignment." +
+                  " The channel remains available.",
+                () => this._stopChannel(channel),
+              ),
+            "danger",
           ),
-          "danger",
-        ));
+        );
       }
       if (channel.removable) {
-        actions.append(this._channelAction(
-          "Delete",
-          () => confirmAction(
-            `Delete ${channel.name}?`,
-            channel.identity_home
-              ? "This is your identity's home. Deleting it breaks previous"
-                + " invitations and removes every topic using the channel."
-              : "Deleting it removes every topic using the channel.",
-            () => this._deleteChannel(channel),
+        actions.append(
+          this._channelAction(
+            "Delete",
+            () =>
+              confirmAction(
+                `Delete ${channel.name}?`,
+                channel.identity_home
+                  ? "This is your identity's home. Deleting it breaks previous" +
+                      " invitations and removes every topic using the channel."
+                  : "Deleting it removes every topic using the channel.",
+                () => this._deleteChannel(channel),
+              ),
+            "danger",
           ),
-          "danger",
-        ));
+        );
       }
       row.append(identity, status, actions);
       list.append(row);
@@ -2423,9 +2398,7 @@ Object.assign(SovereignShell, {
 
   _selectedChannelType() {
     const value = document.getElementById("shellChannelType").value;
-    return (this._channelCatalog.types || []).find(
-      (item) => `${item.kind}:${item.id}` === value,
-    );
+    return (this._channelCatalog.types || []).find((item) => `${item.kind}:${item.id}` === value);
   },
 
   _renderChannelFields() {
@@ -2465,8 +2438,8 @@ Object.assign(SovereignShell, {
         throw new Error(`${input.parentElement.firstChild.textContent} is required.`);
       }
       if (input.value) {
-        values[input.dataset.channelField] = input.type === "number"
-          ? Number(input.value) : input.value;
+        values[input.dataset.channelField] =
+          input.type === "number" ? Number(input.value) : input.value;
       }
     }
     return values;
@@ -2492,8 +2465,7 @@ Object.assign(SovereignShell, {
       await this._refreshChannelManager();
       await this._loadSharing();
       const savedRef = `${values.kind}:${saved.value || ""}`;
-      const becameIdentityHome =
-        this._channelCatalog.identity_channel_ref === savedRef;
+      const becameIdentityHome = this._channelCatalog.identity_channel_ref === savedRef;
       this._note(
         "shellChannelManagerNote",
         becameIdentityHome
@@ -2508,9 +2480,7 @@ Object.assign(SovereignShell, {
 
   async _deleteChannel(channel) {
     try {
-      await this._post(
-        "/api/core/channels/delete", { channel_ref: channel.ref },
-      );
+      await this._post("/api/core/channels/delete", { channel_ref: channel.ref });
       await this._refreshChannelManager();
       await this._loadSharing();
       this._note("shellChannelManagerNote", `${channel.name} deleted.`);
@@ -2522,9 +2492,7 @@ Object.assign(SovereignShell, {
 
   async _stopChannel(channel) {
     try {
-      await this._post(
-        "/api/core/channels/stop", { channel_ref: channel.ref },
-      );
+      await this._post("/api/core/channels/stop", { channel_ref: channel.ref });
       await this._refreshChannelManager();
       await this._loadSharing();
       this._note("shellChannelManagerNote", `${channel.name} is no longer in use.`);
@@ -2541,16 +2509,13 @@ Object.assign(SovereignShell, {
       return;
     }
     try {
-      await this._post(
-        `/api/core/topics/${encodeURIComponent(topic)}/channels`,
-        { channel_ref: channel.ref, action: "use" },
-      );
+      await this._post(`/api/core/topics/${encodeURIComponent(topic)}/channels`, {
+        channel_ref: channel.ref,
+        action: "use",
+      });
       await this._refreshChannelManager();
       await this._loadSharing();
-      this._note(
-        "shellChannelManagerNote",
-        `${channel.name} is now your identity's home channel.`,
-      );
+      this._note("shellChannelManagerNote", `${channel.name} is now your identity's home channel.`);
       await this._changed();
     } catch (error) {
       this._note("shellChannelManagerNote", error.message);

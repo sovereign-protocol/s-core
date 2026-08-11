@@ -9,7 +9,7 @@ binding.
 ## Disagreement and Reactions
 
 - Changes waiting for sync could show a small lamp on the top right of the field (like in a card on Kanban)
-- highlighting nodes not in agreement + showing explaination text on mouseover
+- highlighting nodes not Aligned + showing explaination text on mouseover
 - Reaction buttons, dependent on who made the change and what kind of alignment is there
 
 ## Header on top
@@ -20,7 +20,7 @@ Left aligned:
 - Collaboration icon (where there is a definite topic), opening the collab pane
 - Name of selected topic
 - pull-down button to select another topic
-- Overall status of this topic (in agreement, synced..)
+- Overall status of this topic (Aligned, synced..)
 
 Middle:
 
@@ -58,19 +58,19 @@ otherwise every application must re-style Core's markup, and a minimal one
 never will.
 
 Shell colours are exposed as tokens on `.shell-dialog` / `.shell-bar` so an
-application *can* re-theme deliberately. Doing nothing yields the same chrome
+application _can_ re-theme deliberately. Doing nothing yields the same chrome
 everywhere, which is the point.
 
 ## U2 — reserved colours
 
 **ACCEPTED.** These carry meaning and must not become an application's identity:
 
-| Colour | Means |
-|---|---|
-| red | divergence |
-| amber | in transition |
+| Colour          | Means                                   |
+| --------------- | --------------------------------------- |
+| red             | divergence                              |
+| amber           | in transition                           |
 | teal (`--teal`) | the shared accent, identical everywhere |
-| green | reads as "agreed" / success |
+| green           | reads as "agreed" / success             |
 
 An application palette picks from what is left.
 
@@ -78,11 +78,11 @@ An application palette picks from what is left.
 
 **ACCEPTED**, per the layout above. Fixed regions, left to right:
 
-| Region | Holds |
-|---|---|
-| Left | collaboration button (opens the agreement pane), topic name, topic switcher, topic status |
-| Middle | application icon and name, navigation to other applications, `[+]` new topic |
-| Right | connect area (peers, or "local"), own avatar |
+| Region | Holds                                                                                     |
+| ------ | ----------------------------------------------------------------------------------------- |
+| Left   | collaboration button (opens the agreement pane), topic name, topic switcher, topic status |
+| Middle | application icon and name, navigation to other applications, `[+]` new topic              |
+| Right  | connect area (peers, or "local"), own avatar                                              |
 
 Notes from implementing it:
 
@@ -92,7 +92,7 @@ Notes from implementing it:
 - `[+]` is a shell button with an application handler: a board needs default
   columns, an agreement a title. The button hides itself when an application
   supplies no handler.
-- Channel management moved *into* the connection pane, as the layout implies.
+- Channel management moved _into_ the connection pane, as the layout implies.
   There is no separate "Relay targets" button in the header any more.
 - An application showing many topics at once has no single topic status, so
   the left region collapses rather than claiming one.
@@ -107,7 +107,7 @@ light on a dark surface.
 U1 forced this. Once the shell's chrome became unconditionally dark, an
 application that followed `prefers-color-scheme` put a dark dialog on a light
 page - measured on a light-mode machine: page `#f4f5f7`, dialog `#161b22`.
-Following the machine per application is only coherent if *everything*
+Following the machine per application is only coherent if _everything_
 follows it, including Core's chrome.
 
 Cost of the alternative, for when this is revisited: four palettes, of which
@@ -131,12 +131,12 @@ No exception survives pending the theme toggle above.
 
 ## Current palettes
 
-| Surface | Colour | Note |
-|---|---|---|
-| Shell chrome | `#161b22` on `#0d1117` | Core's, identical everywhere (U1) |
-| S-Initiative | `#171818` warm gray | |
-| S-Cockpit | `#0d1117` blue-gray | |
-| S-Team | `#1c1a17` warm ink | document panel `#262319`, one step lighter (2026-07-26) |
+| Surface      | Colour                 | Note                                                    |
+| ------------ | ---------------------- | ------------------------------------------------------- |
+| Shell chrome | `#161b22` on `#0d1117` | Core's, identical everywhere (U1)                       |
+| S-Initiative | `#171818` warm gray    |                                                         |
+| S-Cockpit    | `#0d1117` blue-gray    |                                                         |
+| S-Team       | `#1c1a17` warm ink     | document panel `#262319`, one step lighter (2026-07-26) |
 
 S-Team was `#111827` until U2, almost exactly the Cockpit's `#0d1117`, so
 two of the three applications looked alike. The warm neutral separates it and

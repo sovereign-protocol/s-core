@@ -118,6 +118,11 @@ class ApplicationServices:
     persist_confirmed_change: Callable[[str], None] = lambda _kind: None
     facades: ApplicationFacadeLookup = _NO_APPLICATION_FACADES
     settings: Mapping[str, Any] = MappingProxyType({})
+    # Where this client keeps its own files. Core owns where a client's
+    # data lives, so an application that writes a local-only artefact - an
+    # export, an archive - asks rather than guessing at a working directory
+    # it does not own and does not share with its own session.
+    data_directory: str = ""
 
     def with_settings(self, settings: Mapping[str, Any] | None) -> "ApplicationServices":
         return replace(self, settings=MappingProxyType(dict(settings or {})))

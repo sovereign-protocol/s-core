@@ -296,6 +296,7 @@ def create_runtime(port: int, config: dict) -> AppRuntime:
         collect_local_blobs=runtime.collect_local_blobs,
         current_revision=runtime.current_revision,
         persist_confirmed_change=runtime.persist_confirmed_change,
+        data_directory=str(Path(storage_file).parent),
     )
     runtime.host = ApplicationHost(
         services,
