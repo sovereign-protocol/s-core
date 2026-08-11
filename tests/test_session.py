@@ -1269,5 +1269,26 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(adopted.children, [])
         self.assertNotIn(leaf.uuid, local.protocol.index)
 
+    def test_only_an_agenda_item_author_can_update_its_text(self):
+        author = Session("si-author")
+        topic = author.create_child(
+            author.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+        item = author.create_agenda_item(topic.uuid, "Original").value
+
+        updated = author.update_agenda_item_text(item.uuid, "  Revised  ")
+
+        self.assertEqual(updated.status, "ok")
+        self.assertEqual(author.protocol.index[item.uuid].data["text"], "Revised")
+
+        peer = Session("si-peer")
+        peer.adopt_subtree(
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            peer.protocol.root.uuid,
+        )
+        refused = peer.update_agenda_item_text(item.uuid, "Hijacked")
+        self.assertEqual(refused.status, "error")
+        self.assertIn("originator", refused.reason)
+
 if __name__ == "__main__":
     unittest.main()

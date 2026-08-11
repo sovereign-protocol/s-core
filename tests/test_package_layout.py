@@ -73,8 +73,21 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn('app.role === "aggregator"', SHARED_JS)
 
     def test_shared_ui_kit_exposes_only_reusable_primitives(self):
-        for primitive in ("avatar", "entityBadge", "disclosure", "addComposer"):
+        for primitive in (
+            "avatar", "entityBadge", "disclosure", "editableText", "addComposer",
+        ):
             self.assertIn(f"  {primitive}(", SHARED_JS)
+
+    def test_shared_editable_text_owns_text_field_appearance_and_behavior(self):
+        shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
+            encoding="utf-8",
+        )
+        for marker in (
+            "ui-editable-text", "dataset.placeholder", "allowEmpty", "onCommit",
+        ):
+            self.assertIn(marker, SHARED_JS)
+        self.assertIn(".ui-editable-text,", shared_css)
+        self.assertIn(".ui-text-field", shared_css)
 
     def test_shared_js_requires_no_dom_element_at_load(self):
         """Core must not make an element an unwritten requirement of using it.
@@ -143,6 +156,13 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("sessionView.mutate", create)
         self.assertIn("optimisticUuid", create)
         self.assertIn('invalidates: ["tiles", "context"]', create)
+
+    def test_an_authors_agenda_text_uses_the_shared_editor(self):
+        agenda_row = SHARED_JS.split("_agendaRow(item) {", 1)[1].split(
+            "\n  _renderAgenda() {", 1,
+        )[0]
+        self.assertIn("SovereignUI.editableText", agenda_row)
+        self.assertIn("routes.update", agenda_row)
 
     def test_relay_presence_refreshes_without_a_browser_reload(self):
         self.assertIn(
