@@ -74,7 +74,8 @@ class PackageLayoutTests(unittest.TestCase):
 
     def test_shared_ui_kit_exposes_only_reusable_primitives(self):
         for primitive in (
-            "avatar", "entityBadge", "disclosure", "editableText", "addComposer",
+            "avatar", "entityBadge", "disclosure", "editableText",
+            "reorderHandle", "reorderableList", "addComposer",
         ):
             self.assertIn(f"  {primitive}(", SHARED_JS)
 
@@ -137,17 +138,22 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("this._beginBatch()", confirmation)
         self.assertIn("this._endBatch(", confirmation)
 
-    def test_agenda_reordering_uses_one_mouse_drag_path(self):
+    def test_agenda_reordering_uses_the_shared_control(self):
         agenda_row = SHARED_JS.split("_agendaRow(item) {", 1)[1].split(
             "\n  _renderAgenda() {", 1,
         )[0]
-        self.assertIn('document.addEventListener("mousemove", move)', agenda_row)
-        self.assertIn('document.addEventListener("mouseup", up)', agenda_row)
+        agenda = SHARED_JS.split("_renderAgenda() {", 1)[1].split(
+            "\n  refreshCollaborationPane() {", 1,
+        )[0]
+        reorder = SHARED_JS.split("reorderableList(options = {}) {", 1)[1].split(
+            "\n  addComposer(options = {}) {", 1,
+        )[0]
+        self.assertIn("SovereignUI.reorderHandle", agenda_row)
+        self.assertIn("SovereignUI.reorderableList", agenda)
+        self.assertIn('document.addEventListener("mousemove", move)', reorder)
+        self.assertIn('document.addEventListener("mouseup", up)', reorder)
+        self.assertIn('event.key !== previous && event.key !== next', reorder)
         self.assertNotIn("row.draggable = true", agenda_row)
-        self.assertNotIn("row.ondrop", agenda_row)
-        visible_drop = agenda_row.index("placement.target.after(row)")
-        network_post = agenda_row.index("await this._post(routes.move")
-        self.assertLess(visible_drop, network_post)
 
     def test_agenda_creation_uses_the_shared_optimistic_session(self):
         create = SHARED_JS.split("async _addAgendaItem()", 1)[1].split(

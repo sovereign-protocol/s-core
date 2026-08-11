@@ -234,6 +234,66 @@ button.danger {
   opacity: 0.72;
 }
 
+/* One reorder language for every list. Applications keep their own item
+   contents; Core owns the handle, focus, drag state and insertion marker. */
+.ui-reorderable-item { position: relative; }
+.ui-reorderable-list[data-reorder-axis="vertical"] > .ui-reorderable-item {
+  box-sizing: border-box;
+}
+.ui-reorder-handle {
+  box-sizing: border-box;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-muted, var(--shell-muted, #6b7280));
+  background: transparent;
+  cursor: grab;
+  font: inherit;
+  line-height: 1;
+  touch-action: none;
+  user-select: none;
+  opacity: 0.62;
+}
+.ui-reorder-handle:hover,
+.ui-reorder-handle:focus-visible {
+  border-color: var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
+  color: inherit;
+  opacity: 1;
+}
+.ui-reorder-handle:focus-visible {
+  outline: 2px solid var(--teal, var(--shell-accent, #2f6feb));
+  outline-offset: 1px;
+}
+.ui-reorder-handle:active { cursor: grabbing; }
+.ui-reorderable-item.ui-reordering,
+.ui-reorderable-item[data-reorder-busy="true"] { opacity: 0.5; }
+.ui-reorderable-item.ui-drop-before::before,
+.ui-reorderable-item.ui-drop-after::after {
+  content: "";
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: var(--teal, var(--shell-accent, #2f6feb));
+}
+.ui-reorderable-list[data-reorder-axis="vertical"] > .ui-drop-before::before,
+.ui-reorderable-list[data-reorder-axis="vertical"] > .ui-drop-after::after {
+  left: 4px;
+  right: 4px;
+  height: 2px;
+}
+.ui-reorderable-list[data-reorder-axis="vertical"] > .ui-drop-before::before { top: -4px; }
+.ui-reorderable-list[data-reorder-axis="vertical"] > .ui-drop-after::after { bottom: -4px; }
+.ui-reorderable-list[data-reorder-axis="horizontal"] > .ui-drop-before::before,
+.ui-reorderable-list[data-reorder-axis="horizontal"] > .ui-drop-after::after {
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+}
+.ui-reorderable-list[data-reorder-axis="horizontal"] > .ui-drop-before::before { left: -7px; }
+.ui-reorderable-list[data-reorder-axis="horizontal"] > .ui-drop-after::after { right: -7px; }
+
 /* One reusable add flow: a quiet trigger, then a properly spaced inline form.
    Apps choose where the control lives and what creation means. */
 .ui-add-control { margin: 6px 0; }
@@ -1137,21 +1197,14 @@ dialog menu .danger:not(:last-child) {
 .shell-agenda-item.has-drag {
   grid-template-columns: auto minmax(0, 1fr) auto;
 }
+.shell-pane .ui-reorder-handle {
+  border-color: transparent;
+  background: transparent;
+  color: var(--shell-muted);
+}
 .shell-agenda-item[data-priority="high"] { border-left-color: #f87171; }
 .shell-agenda-item[data-priority="medium"] { border-left-color: #fbbf24; }
 .shell-agenda-item[data-priority="low"] { border-left-color: #60a5fa; }
-.shell-agenda-item.is-dragging { opacity: 0.45; }
-.shell-agenda-item.drop-before::before,
-.shell-agenda-item.drop-after::after {
-  content: "";
-  position: absolute;
-  left: 4px;
-  right: 4px;
-  height: 2px;
-  background: var(--shell-accent, #2f6feb);
-}
-.shell-agenda-item.drop-before::before { top: -4px; }
-.shell-agenda-item.drop-after::after { bottom: -4px; }
 .shell-agenda-text { min-width: 0; overflow-wrap: anywhere; }
 .shell-agenda-text.ui-editable-text { margin: -4px 0; }
 .shell-agenda-actions {
@@ -1159,18 +1212,6 @@ dialog menu .danger:not(:last-child) {
   align-items: center;
   gap: 6px;
 }
-.shell-agenda-drag {
-  border: 0 !important;
-  background: transparent !important;
-  color: var(--shell-muted) !important;
-  cursor: grab !important;
-  letter-spacing: -3px;
-  min-width: 24px;
-  padding: 2px 7px 2px 4px !important;
-  touch-action: none;
-  user-select: none;
-}
-.shell-agenda-drag:active { cursor: grabbing !important; }
 .shell-agenda-priority-control {
   min-width: 92px;
   padding: 4px 6px !important;

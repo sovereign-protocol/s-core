@@ -15,7 +15,7 @@ currently experimental.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+.\.venv\Scripts\python.exe -m pip install -e ".[test]" -e ".\examples\notes"
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\sovereign-host.exe 9305:manual
 ```

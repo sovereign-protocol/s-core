@@ -296,6 +296,191 @@ const SovereignUI = Object.freeze({
     return element;
   },
 
+  reorderHandle(options = {}) {
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = `ui-reorder-handle ${options.className || ""}`.trim();
+    handle.textContent = options.text || "\u283f";
+    const label = options.label || "Reorder item";
+    handle.title = label;
+    handle.setAttribute("aria-label", label);
+    return handle;
+  },
+
+  // Reorder direct children without knowing what they contain or how an
+  // application persists them. The list owns pointer/keyboard behaviour and
+  // the optimistic DOM move; the application supplies only identity and save.
+  reorderableList(options = {}) {
+    const container = options.container;
+    if (!container) throw new Error("reorderableList requires a container");
+    const existing = container._sovereignReorderableList;
+    if (existing) {
+      existing.update(options);
+      return existing;
+    }
+
+    let settings = {};
+    let source = null;
+    let placement = null;
+    let committing = false;
+    const handles = () => settings.handleSelector || ".ui-reorder-handle";
+    const items = () => [...container.children].filter((item) =>
+      item.matches(settings.itemSelector || "[data-reorder-id]"),
+    );
+    const idOf = (item) => String(
+      settings.getId ? settings.getId(item) : item.dataset.reorderId || "",
+    );
+    const itemFor = (node) => {
+      let item = node;
+      while (item && item.parentElement !== container) item = item.parentElement;
+      return item && items().includes(item) ? item : null;
+    };
+    const itemForHandle = (handle) => {
+      const item = itemFor(handle);
+      const owner = handle.closest("[data-reorder-id]");
+      return item && owner?.dataset.reorderId === idOf(item) ? item : null;
+    };
+    const clearPlacement = () => {
+      for (const item of items()) {
+        item.classList.remove("ui-drop-before", "ui-drop-after");
+      }
+      placement = null;
+    };
+    const finishInteraction = () => {
+      clearPlacement();
+      source?.classList.remove("ui-reordering");
+      source = null;
+      if (!committing) delete container.dataset.reordering;
+    };
+    const targetAt = (clientX, clientY) => {
+      clearPlacement();
+      const target = itemFor(document.elementFromPoint(clientX, clientY));
+      if (!target || target === source) return null;
+      const bounds = target.getBoundingClientRect();
+      const horizontal = settings.axis === "horizontal";
+      const after = horizontal
+        ? clientX > bounds.left + bounds.width / 2
+        : clientY > bounds.top + bounds.height / 2;
+      target.classList.add(after ? "ui-drop-after" : "ui-drop-before");
+      placement = {target, after};
+      return placement;
+    };
+    const commit = async (item, index) => {
+      const before = items();
+      const fromIndex = before.indexOf(item);
+      if (fromIndex < 0 || index === fromIndex || committing) return;
+      const originalNext = item.nextSibling;
+      const without = before.filter((entry) => entry !== item);
+      const reference = without[index]
+        || without[without.length - 1]?.nextSibling
+        || null;
+      container.insertBefore(item, reference);
+      committing = true;
+      container.dataset.reordering = "true";
+      item.dataset.reorderBusy = "true";
+      let saved = false;
+      try {
+        await settings.onMove?.({
+          id: idOf(item), index, fromIndex, item,
+        });
+        saved = true;
+        delete container.dataset.reordering;
+        if (settings.onChanged) await settings.onChanged();
+      } catch (error) {
+        if (!saved) container.insertBefore(item, originalNext);
+        if (settings.onError) settings.onError(error);
+        else showToast(error.message, true);
+      } finally {
+        committing = false;
+        delete item.dataset.reorderBusy;
+        delete container.dataset.reordering;
+      }
+    };
+    const moveFromPlacement = async () => {
+      if (!source || !placement) {
+        finishInteraction();
+        return;
+      }
+      const item = source;
+      const remaining = items().filter((entry) => entry !== item);
+      let index = remaining.indexOf(placement.target);
+      if (index < 0) {
+        finishInteraction();
+        return;
+      }
+      if (placement.after) index += 1;
+      finishInteraction();
+      await commit(item, index);
+    };
+    const onMouseDown = (event) => {
+      const handle = event.target.closest(handles());
+      if (!handle || !container.contains(handle) || event.button !== 0 || committing) return;
+      const item = itemForHandle(handle);
+      if (!item || !idOf(item)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      source = item;
+      source.classList.add("ui-reordering");
+      container.dataset.reordering = "true";
+      const move = (moveEvent) => targetAt(moveEvent.clientX, moveEvent.clientY);
+      const up = async (upEvent) => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        targetAt(upEvent.clientX, upEvent.clientY);
+        await moveFromPlacement();
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    };
+    const onKeyDown = async (event) => {
+      const handle = event.target.closest(handles());
+      if (!handle || !container.contains(handle) || committing) return;
+      const item = itemForHandle(handle);
+      if (!item) return;
+      const ordered = items();
+      const fromIndex = ordered.indexOf(item);
+      const previous = settings.axis === "horizontal" ? "ArrowLeft" : "ArrowUp";
+      const next = settings.axis === "horizontal" ? "ArrowRight" : "ArrowDown";
+      if (event.key !== previous && event.key !== next) return;
+      const index = fromIndex + (event.key === previous ? -1 : 1);
+      if (index < 0 || index >= ordered.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      await commit(item, index);
+    };
+    const onClick = (event) => {
+      const handle = event.target.closest(handles());
+      if (!handle || !itemForHandle(handle)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    const refresh = () => {
+      container.classList.add("ui-reorderable-list");
+      container.dataset.reorderAxis = settings.axis === "horizontal" ? "horizontal" : "vertical";
+      const ordered = items();
+      for (const item of ordered) item.classList.add("ui-reorderable-item");
+      for (const handle of container.querySelectorAll(handles())) {
+        const item = itemForHandle(handle);
+        if (!item) continue;
+        handle.hidden = ordered.length < 2;
+        handle.setAttribute("aria-keyshortcuts",
+          settings.axis === "horizontal" ? "ArrowLeft ArrowRight" : "ArrowUp ArrowDown");
+      }
+    };
+    const update = (next = {}) => {
+      settings = {...settings, ...next};
+      refresh();
+    };
+
+    container.addEventListener("mousedown", onMouseDown);
+    container.addEventListener("keydown", onKeyDown);
+    container.addEventListener("click", onClick);
+    const control = {update, refresh};
+    container._sovereignReorderableList = control;
+    update(options);
+    return control;
+  },
+
   addComposer(options = {}) {
     const noun = String(options.noun || "item").trim();
     const control = document.createElement("div");
@@ -1671,94 +1856,13 @@ Object.assign(SovereignShell, {
     row.className = "shell-agenda-item";
     row.dataset.priority = item.data.priority || "";
     row.dataset.itemUuid = item.uuid;
+    row.dataset.reorderId = item.uuid;
 
-    if (routes && routes.move) {
+    if (mine && routes?.move) {
       row.classList.add("has-drag");
-      const handle = document.createElement("button");
-      handle.type = "button";
-      handle.className = "shell-agenda-drag";
-      handle.textContent = "⋮⋮";
-      handle.title = "Drag to rearrange";
-      handle.setAttribute("aria-label", "Drag to rearrange");
-      const clearDrag = () => {
-        this._dragAgendaUuid = "";
-        row.classList.remove("is-dragging");
-        document.querySelectorAll(".shell-agenda-item").forEach((entry) => {
-          entry.classList.remove("drop-before", "drop-after");
-        });
-      };
-      const targetAt = (clientX, clientY) => {
-        const target = document.elementFromPoint(clientX, clientY)?.closest(".shell-agenda-item");
-        document.querySelectorAll(".shell-agenda-item").forEach((entry) => {
-          entry.classList.remove("drop-before", "drop-after");
-        });
-        if (!target || target.dataset.itemUuid === item.uuid) return null;
-        const bounds = target.getBoundingClientRect();
-        const after = clientY > bounds.top + bounds.height / 2;
-        target.classList.add(after ? "drop-after" : "drop-before");
-        return { target, after };
-      };
-      const finishDrag = async (clientX, clientY) => {
-        if (this._dragAgendaUuid !== item.uuid) return;
-        const placement = targetAt(clientX, clientY);
-        if (!placement) {
-          clearDrag();
-          return;
-        }
-        const targetUuid = placement.target.dataset.itemUuid || "";
-        if (!targetUuid || targetUuid === item.uuid) {
-          clearDrag();
-          return;
-        }
-        const items = (
-          (this._options.state ? this._options.state() : {}).agenda_items || []
-        ).filter((entry) => entry.uuid !== item.uuid);
-        let index = items.findIndex((entry) => entry.uuid === targetUuid);
-        if (index < 0) {
-          clearDrag();
-          return;
-        }
-        if (placement.after) index += 1;
-        // Commit the visible drop before waiting for persistence, relay
-        // publication, or an application refresh. A failed request reloads
-        // the authoritative order below.
-        if (placement.after) placement.target.after(row);
-        else placement.target.before(row);
-        clearDrag();
-        try {
-          await this._post(routes.move, { item_uuid: item.uuid, index });
-          await this._changed();
-          this.openCollab();
-        } catch (error) {
-          showToast(error.message, true);
-          await this._changed();
-          this.openCollab();
-        }
-      };
-      handle.onmousedown = (event) => {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        this._dragAgendaUuid = item.uuid;
-        row.classList.add("is-dragging");
-        const move = (moveEvent) => {
-          if (this._dragAgendaUuid === item.uuid) {
-            targetAt(moveEvent.clientX, moveEvent.clientY);
-          }
-        };
-        const up = (upEvent) => {
-          document.removeEventListener("mousemove", move);
-          document.removeEventListener("mouseup", up);
-          finishDrag(upEvent.clientX, upEvent.clientY);
-        };
-        document.addEventListener("mousemove", move);
-        document.addEventListener("mouseup", up);
-      };
-      // Do not also opt the row into native HTML drag-and-drop. WebView2 can
-      // switch from these mouse handlers to native dragging after mousedown;
-      // the drop then belongs to the target row and its item closure, which
-      // rejects the source UUID. One mouse path keeps the source authoritative
-      // and works consistently in the desktop window and ordinary browsers.
-      row.append(handle);
+      row.append(SovereignUI.reorderHandle({
+        label: "Reorder discussion topic",
+      }));
     }
 
     const text = document.createElement("span");
@@ -1862,7 +1966,17 @@ Object.assign(SovereignShell, {
       list.append(empty);
     }
     for (const item of items) list.append(this._agendaRow(item));
-    document.getElementById("shellAgendaForm").hidden = !this._agendaRoutes();
+    const routes = this._agendaRoutes();
+    SovereignUI.reorderableList({
+      container: list,
+      itemSelector: ".shell-agenda-item",
+      onMove: ({id, index}) => this._post(routes.move, {item_uuid: id, index}),
+      onChanged: async () => {
+        await this._changed();
+        this.openCollab();
+      },
+    });
+    document.getElementById("shellAgendaForm").hidden = !routes;
   },
 
   refreshCollaborationPane() {
@@ -1871,7 +1985,8 @@ Object.assign(SovereignShell, {
 
     const agenda = document.getElementById("shellAgendaList");
     const agendaIsActive =
-      this._dragAgendaUuid || (agenda && agenda.contains(document.activeElement));
+      agenda?.dataset.reordering === "true"
+      || (agenda && agenda.contains(document.activeElement));
     if (!agendaIsActive) this._renderAgenda();
 
     this._renderDisagreementList(document.getElementById("shellDisagreementList"));
