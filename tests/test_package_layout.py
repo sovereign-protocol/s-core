@@ -76,8 +76,36 @@ class PackageLayoutTests(unittest.TestCase):
         for primitive in (
             "avatar", "entityBadge", "disclosure", "editableText",
             "reorderHandle", "reorderableList", "addComposer",
+            "selectControl", "refreshSelect", "selectOptions",
+            "selectionControl", "selectionField",
+            "actionMenu", "reactionControl",
         ):
             self.assertIn(f"  {primitive}(", SHARED_JS)
+
+    def test_selection_fields_and_action_menus_have_distinct_shared_contracts(self):
+        shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
+            encoding="utf-8",
+        )
+        selection = SHARED_JS.split("  selectionControl(options = {}) {", 1)[1].split(
+            "\n  selectionField(options = {}) {", 1,
+        )[0]
+        field = SHARED_JS.split("  selectionField(options = {}) {", 1)[1].split(
+            "\n  actionMenu(options = {}) {", 1,
+        )[0]
+        menu = SHARED_JS.split("function ensureActionMenu() {", 1)[1].split(
+            "\nfunction openActionMenu(", 1,
+        )[0]
+        self.assertIn('document.createElement("select")', selection)
+        self.assertIn('select.addEventListener("change", options.onChange)', selection)
+        self.assertIn("this.selectionControl(options)", field)
+        self.assertIn('control.className = "ui-select-control"', SHARED_JS)
+        self.assertIn('select.classList.add("ui-select", "ui-select-native")', SHARED_JS)
+        self.assertIn('button.setAttribute("aria-haspopup", "menu")', SHARED_JS)
+        self.assertIn('event.key === "ArrowDown"', menu)
+        self.assertIn('event.key === "Escape"', menu)
+        self.assertIn(".ui-select-control", shared_css)
+        self.assertIn("select.ui-select-native", shared_css)
+        self.assertIn(".ui-action-menu", shared_css)
 
     def test_shared_editable_text_owns_text_field_appearance_and_behavior(self):
         shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
@@ -154,6 +182,17 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn('document.addEventListener("mouseup", up)', reorder)
         self.assertIn('event.key !== previous && event.key !== next', reorder)
         self.assertNotIn("row.draggable = true", agenda_row)
+
+    def test_collaboration_selects_use_the_shared_option_population(self):
+        agenda_row = SHARED_JS.split("_agendaRow(item) {", 1)[1].split(
+            "\n  _renderAgenda() {", 1,
+        )[0]
+        auto_adopt = SHARED_JS.split("_autoAdoptControl() {", 1)[1].split(
+            "\n  openCollab() {", 1,
+        )[0]
+        self.assertIn("SovereignUI.selectionControl({", agenda_row)
+        self.assertIn('variant: "compact"', agenda_row)
+        self.assertIn("SovereignUI.selectionControl({", auto_adopt)
 
     def test_agenda_creation_uses_the_shared_optimistic_session(self):
         create = SHARED_JS.split("async _addAgendaItem()", 1)[1].split(

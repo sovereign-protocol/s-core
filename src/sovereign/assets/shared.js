@@ -554,6 +554,217 @@ const SovereignUI = Object.freeze({
     return control;
   },
 
+  // One closed presentation for native selects. The transparent native
+  // control covers it, so opening, selection, validation and keyboard use
+  // remain the browser's while the value and chevron look the same everywhere.
+  selectControl(select, options = {}) {
+    if (!select) throw new Error("selectControl requires a select element");
+    let api = select._sovereignSelectControl;
+    if (!api) {
+      const control = document.createElement("span");
+      control.className = "ui-select-control";
+      const value = document.createElement("span");
+      value.className = "ui-select-value";
+      value.setAttribute("aria-hidden", "true");
+      const toggle = document.createElement("span");
+      toggle.className = "ui-select-toggle";
+      toggle.setAttribute("aria-hidden", "true");
+      toggle.innerHTML = (
+        `<svg viewBox="0 0 24 24" class="icon-svg">${ICON_CHEVRON_DOWN}</svg>`
+      );
+      if (select.parentNode) select.replaceWith(control);
+      select.classList.add("ui-select", "ui-select-native");
+      control.append(value, toggle, select);
+      const update = () => {
+        const selected = select.selectedOptions[0];
+        value.textContent = selected?.textContent || "";
+        value.title = selected?.textContent || "";
+        control.dataset.disabled = String(select.disabled);
+        control.dataset.busy = String(select.getAttribute("aria-busy") === "true");
+      };
+      api = {control, value, toggle, update};
+      select._sovereignSelectControl = api;
+      select.addEventListener("change", () => {
+        update();
+        // Application handlers sometimes reset action-selects to their
+        // placeholder. They run after this listener, so reflect that reset.
+        queueMicrotask(update);
+      });
+      new MutationObserver(update).observe(select, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+    api.control.dataset.variant = options.variant || api.control.dataset.variant || "field";
+    if (options.controlClass) {
+      api.control.classList.add(...options.controlClass.split(/\s+/).filter(Boolean));
+    }
+    api.update();
+    return api;
+  },
+
+  refreshSelect(select) {
+    select?._sovereignSelectControl?.update();
+    return select;
+  },
+
+  // Native selection controls are intentionally distinct from action menus.
+  // This helper owns their repeated option population and states.
+  selectOptions(select, items = [], options = {}) {
+    if (!select) throw new Error("selectOptions requires a select element");
+    const priorValue = select.value;
+    const hasRequestedValue = Object.prototype.hasOwnProperty.call(options, "value");
+    const requestedValue = hasRequestedValue
+      ? String(options.value ?? "")
+      : priorValue;
+    select.classList.add("ui-select");
+    select.replaceChildren();
+
+    const appendOption = (host, item) => {
+      const normalized = Array.isArray(item)
+        ? {value: item[0], label: item[1]}
+        : (typeof item === "object" && item !== null
+          ? item
+          : {value: item, label: item});
+      const option = document.createElement("option");
+      option.value = String(normalized.value ?? "");
+      option.textContent = String(normalized.label ?? normalized.value ?? "");
+      option.disabled = Boolean(normalized.disabled);
+      if (normalized.dataset) {
+        for (const [key, value] of Object.entries(normalized.dataset)) {
+          option.dataset[key] = String(value ?? "");
+        }
+      }
+      host.append(option);
+      return option;
+    };
+
+    if (options.loading) {
+      appendOption(select, {value: "", label: options.loadingLabel || "Loading…"});
+      select.disabled = true;
+      select.setAttribute("aria-busy", "true");
+      this.selectControl(select, options).update();
+      return select;
+    }
+    select.removeAttribute("aria-busy");
+    select.disabled = Boolean(options.disabled);
+
+    if (options.placeholder) {
+      appendOption(select, {
+        value: "",
+        label: options.placeholder,
+        disabled: options.placeholderDisabled !== false,
+      });
+    } else if (Object.prototype.hasOwnProperty.call(options, "emptyLabel")) {
+      appendOption(select, {value: "", label: options.emptyLabel});
+    }
+
+    const groups = new Map();
+    for (const item of items) {
+      const groupName = !Array.isArray(item) && item && typeof item === "object"
+        ? item.group
+        : "";
+      if (!groupName) {
+        appendOption(select, item);
+        continue;
+      }
+      let group = groups.get(groupName);
+      if (!group) {
+        group = document.createElement("optgroup");
+        group.label = groupName;
+        groups.set(groupName, group);
+        select.append(group);
+      }
+      appendOption(group, item);
+    }
+    if (
+      hasRequestedValue
+      || [...select.options].some((option) => option.value === requestedValue)
+    ) select.value = requestedValue;
+    this.selectControl(select, options).update();
+    return select;
+  },
+
+  selectionControl(options = {}) {
+    const select = options.select || document.createElement("select");
+    if (options.id) select.id = options.id;
+    if (options.name) select.name = options.name;
+    if (Object.prototype.hasOwnProperty.call(options, "required")) {
+      select.required = Boolean(options.required);
+    }
+    if (options.ariaLabel) select.setAttribute("aria-label", options.ariaLabel);
+    if (options.title) select.title = options.title;
+    if (options.selectClass) {
+      select.classList.add(...options.selectClass.split(/\s+/).filter(Boolean));
+    }
+    this.selectOptions(select, options.items || [], options);
+    if (options.onChange) select.addEventListener("change", options.onChange);
+    const control = select._sovereignSelectControl.control;
+    return {
+      select,
+      input: select,
+      control,
+      setOptions: (items, state = {}) => this.selectOptions(select, items, state),
+    };
+  },
+
+  selectionField(options = {}) {
+    const field = document.createElement("label");
+    field.className = `ui-selection-field ${options.className || ""}`.trim();
+    const caption = document.createElement("span");
+    caption.className = "ui-field-label";
+    caption.textContent = options.label || "";
+    const selection = this.selectionControl(options);
+    const {select, control} = selection;
+    field.append(caption, control);
+
+    const describedBy = [];
+    const addMessage = (className, text, suffix) => {
+      if (!text) return null;
+      const message = document.createElement("small");
+      message.className = className;
+      message.textContent = text;
+      if (select.id) {
+        message.id = `${select.id}-${suffix}`;
+        describedBy.push(message.id);
+      }
+      field.append(message);
+      return message;
+    };
+    const help = addMessage("ui-field-help", options.help, "help");
+    const error = addMessage("ui-field-error", options.error, "error");
+    if (describedBy.length) select.setAttribute("aria-describedby", describedBy.join(" "));
+    if (error) select.setAttribute("aria-invalid", "true");
+    return {
+      ...selection,
+      field,
+      label: field,
+      help,
+      error,
+    };
+  },
+
+  // Action menus choose an operation, not a value. They share one popup so
+  // dismissal, positioning, focus and keyboard navigation are fixed once.
+  actionMenu(options = {}) {
+    const button = options.button || document.createElement("button");
+    button.type = "button";
+    if (options.label) button.textContent = options.label;
+    if (options.className) button.classList.add(...options.className.split(/\s+/).filter(Boolean));
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", "false");
+    const items = () => typeof options.items === "function" ? options.items() : options.items || [];
+    const open = () => openActionMenu(button, items(), options);
+    const close = (restoreFocus = false) => closeActionMenu(restoreFocus);
+    button.onclick = (event) => {
+      event.stopPropagation();
+      if (uiActionMenuAnchor === button && !uiActionMenu.hidden) close();
+      else open();
+    };
+    return {button, open, close};
+  },
+
   // One shape for "there is a difference here, what do you want to do about
   // it", wherever it appears. A single available reaction is a button that
   // names the act, because a button reading "React" hides an answer the
@@ -592,12 +803,14 @@ const SovereignUI = Object.freeze({
       return button;
     }
     button.textContent = options.menuLabel || "React";
-    button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-label", "React to differences");
-    button.onclick = (event) => {
-      event.stopPropagation();
-      openReactionMenu(button, choices, react);
-    };
+    this.actionMenu({
+      button,
+      items: choices.map((choice) => ({
+        label: choice.label,
+        onSelect: () => react(choice),
+      })),
+    });
     return button;
   },
 });
@@ -830,66 +1043,131 @@ function reactionChoices(info) {
   }));
 }
 
-// The menu is Core's own element rather than markup each page must carry:
-// three applications had already copied the same div, and a page that forgot
-// it lost its reactions with nothing on screen to say so.
-let uiReactionMenu = null;
+// One body-level popup serves every action menu. Applications provide only
+// the button and operations; Core owns accessibility and interaction details.
+let uiActionMenu = null;
+let uiActionMenuAnchor = null;
 
-function closeReactionMenu() {
-  if (!uiReactionMenu) return;
-  uiReactionMenu.hidden = true;
-  uiReactionMenu.replaceChildren();
+function closeActionMenu(restoreFocus = false) {
+  if (!uiActionMenu) return;
+  uiActionMenu.hidden = true;
+  uiActionMenu.replaceChildren();
+  uiActionMenuAnchor?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) uiActionMenuAnchor?.focus();
+  uiActionMenuAnchor = null;
 }
 
-function openReactionMenu(anchor, choices, react) {
-  if (!uiReactionMenu) {
-    uiReactionMenu = document.createElement("div");
-    uiReactionMenu.className = "ui-reaction-menu";
-    uiReactionMenu.setAttribute("role", "menu");
-    uiReactionMenu.hidden = true;
-    document.body.append(uiReactionMenu);
-    // Bound with the menu rather than at load: a page that never opens one
-    // is left with no listeners of Core's on its document, and Core asks
-    // nothing of a page's markup before it is used.
-    document.addEventListener("click", (event) => {
-      if (!event.target.closest(".ui-reaction-menu")) closeReactionMenu();
-    });
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeReactionMenu();
-    });
-    // The menu is positioned against a button that has just been measured,
-    // so anything that moves that button closes it rather than leaving it
-    // pointing somewhere else.
-    window.addEventListener("resize", closeReactionMenu);
-    window.addEventListener("scroll", closeReactionMenu, true);
+function actionMenuButtons() {
+  return uiActionMenu
+    ? [...uiActionMenu.querySelectorAll('[role^="menuitem"]')].filter(
+      (item) => !item.disabled,
+    )
+    : [];
+}
+
+function ensureActionMenu() {
+  if (uiActionMenu) return uiActionMenu;
+  uiActionMenu = document.createElement("div");
+  uiActionMenu.id = "sovereignActionMenu";
+  uiActionMenu.className = "ui-action-menu";
+  uiActionMenu.setAttribute("role", "menu");
+  uiActionMenu.hidden = true;
+  document.body.append(uiActionMenu);
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (
+      !target?.closest(".ui-action-menu")
+      && !uiActionMenuAnchor?.contains(target)
+    ) closeActionMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (uiActionMenu.hidden) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeActionMenu(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      closeActionMenu();
+      return;
+    }
+    const buttons = actionMenuButtons();
+    if (!buttons.length) return;
+    const current = buttons.indexOf(document.activeElement);
+    let next = null;
+    if (event.key === "ArrowDown") next = buttons[(current + 1) % buttons.length];
+    else if (event.key === "ArrowUp") {
+      next = buttons[(current - 1 + buttons.length) % buttons.length];
+    } else if (event.key === "Home") next = buttons[0];
+    else if (event.key === "End") next = buttons[buttons.length - 1];
+    if (next) {
+      event.preventDefault();
+      next.focus();
+    }
+  });
+  window.addEventListener("resize", () => closeActionMenu());
+  window.addEventListener("scroll", () => closeActionMenu(), true);
+  return uiActionMenu;
+}
+
+function openActionMenu(anchor, items = [], options = {}) {
+  const menu = ensureActionMenu();
+  const choices = items.filter(Boolean);
+  if (!choices.length) {
+    closeActionMenu();
+    if (options.emptyMessage) showToast(options.emptyMessage, true);
+    return;
   }
-  const menu = uiReactionMenu;
-  menu.replaceChildren();
-  for (const choice of choices) {
-    const option = document.createElement("button");
-    option.type = "button";
-    option.className = "ui-reaction-menu-option";
-    option.setAttribute("role", "menuitem");
-    option.textContent = choice.label;
-    option.onclick = async (event) => {
+  closeActionMenu();
+  uiActionMenuAnchor = anchor;
+  anchor.setAttribute("aria-controls", menu.id);
+  anchor.setAttribute("aria-expanded", "true");
+  menu.style.minWidth = options.minWidth || "";
+  for (const item of choices) {
+    if (item.separator) {
+      const separator = document.createElement("div");
+      separator.className = "ui-action-menu-separator";
+      separator.setAttribute("role", "separator");
+      menu.append(separator);
+      continue;
+    }
+    const choice = document.createElement("button");
+    choice.type = "button";
+    choice.className = `ui-action-menu-option ${item.danger ? "is-danger" : ""}`.trim();
+    choice.setAttribute("role", item.role || "menuitem");
+    if (item.checked !== undefined) {
+      choice.setAttribute("aria-checked", String(Boolean(item.checked)));
+    }
+    choice.textContent = item.label;
+    choice.disabled = Boolean(item.disabled);
+    choice.onclick = async (event) => {
       event.stopPropagation();
-      closeReactionMenu();
-      await react(choice);
+      closeActionMenu();
+      try {
+        await (item.onSelect || item.action)?.(item);
+      } catch (error) {
+        if (options.onError) options.onError(error);
+        else showToast(error.message, true);
+      }
     };
-    menu.append(option);
+    menu.append(choice);
   }
   menu.hidden = false;
   const rect = anchor.getBoundingClientRect();
   const margin = 8;
+  const alignedLeft = options.align === "end"
+    ? rect.right - menu.offsetWidth
+    : rect.left;
   menu.style.left = `${Math.max(
     margin,
-    Math.min(rect.left, window.innerWidth - menu.offsetWidth - margin),
+    Math.min(alignedLeft, window.innerWidth - menu.offsetWidth - margin),
   )}px`;
   let top = rect.bottom + 4;
   if (top + menu.offsetHeight > window.innerHeight - margin) {
     top = Math.max(margin, rect.top - menu.offsetHeight - 4);
   }
   menu.style.top = `${top}px`;
+  if (options.focus !== false) actionMenuButtons()[0]?.focus();
 }
 
 /*
@@ -1436,7 +1714,7 @@ Object.assign(SovereignShell, {
       // undone by Cancel. Saying so here is cheaper than the surprise.
       '<hr class="shell-profile-divider">',
       '<label for="shellThemeSelect">Theme</label>',
-      '<select id="shellThemeSelect">',
+      '<select id="shellThemeSelect" class="ui-select">',
       '<option value="dark">Dark</option>',
       '<option value="light">Light</option>',
       "</select>",
@@ -1450,6 +1728,7 @@ Object.assign(SovereignShell, {
     ].join("");
     document.body.append(...host.children);
     this._profileReady = true;
+    SovereignUI.selectControl(document.getElementById("shellThemeSelect"));
 
     document.getElementById("shellProfileCancelBtn").onclick = () =>
       document.getElementById("shellProfileModal").close();
@@ -1487,7 +1766,9 @@ Object.assign(SovereignShell, {
       this._note("shellProfileNote", "Could not read your profile.");
     }
     document.getElementById("shellProfileName").value = view.display_name || "";
-    document.getElementById("shellThemeSelect").value = this.theme();
+    const themeSelect = document.getElementById("shellThemeSelect");
+    themeSelect.value = this.theme();
+    SovereignUI.refreshSelect(themeSelect);
     document.getElementById("shellProfilePicture").value = "";
     const preview = document.getElementById("shellProfilePreview");
     preview.src = view.picture || "";
@@ -1901,34 +2182,31 @@ Object.assign(SovereignShell, {
     // That rule is Session's, and the view simply reflects it. Priority and
     // delete stay out of the way until you are looking at your own row.
     if (mine && routes) {
-      const priority = document.createElement("select");
-      priority.className = "shell-agenda-priority-control";
-      priority.setAttribute("aria-label", "Priority for " + (item.data.text || "agenda topic"));
-      for (const [value, label] of [
-        ["", "No priority"],
-        ["high", "High"],
-        ["medium", "Medium"],
-        ["low", "Low"],
-      ]) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        priority.append(option);
-      }
-      priority.value = item.data.priority || "";
-      priority.onchange = async () => {
-        row.dataset.priority = priority.value || "";
-        try {
-          await this._post(routes.setPriority, {
-            item_uuid: item.uuid,
-            priority: priority.value || null,
-          });
-          await this._changed();
-          this.openCollab();
-        } catch (error) {
-          showToast(error.message, true);
-        }
-      };
+      const {control: priorityControl} = SovereignUI.selectionControl({
+        items: [
+          ["", "No priority"],
+          ["high", "High"],
+          ["medium", "Medium"],
+          ["low", "Low"],
+        ],
+        value: item.data.priority || "",
+        variant: "compact",
+        ariaLabel: "Priority for " + (item.data.text || "agenda topic"),
+        selectClass: "shell-agenda-priority-control",
+        onChange: async ({currentTarget: priority}) => {
+          row.dataset.priority = priority.value || "";
+          try {
+            await this._post(routes.setPriority, {
+              item_uuid: item.uuid,
+              priority: priority.value || null,
+            });
+            await this._changed();
+            this.openCollab();
+          } catch (error) {
+            showToast(error.message, true);
+          }
+        },
+      });
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "shell-agenda-delete shell-agenda-hover";
@@ -1942,7 +2220,7 @@ Object.assign(SovereignShell, {
           showToast(error.message, true);
         }
       };
-      actions.append(priority, remove);
+      actions.append(remove, priorityControl);
     } else {
       const priority = document.createElement("span");
       priority.className = "shell-agenda-priority-label";
@@ -2031,15 +2309,23 @@ Object.assign(SovereignShell, {
     const indicator = document.createElement("span");
     indicator.className = "shell-auto-adopt-indicator";
     indicator.setAttribute("aria-hidden", "true");
-    const select = document.createElement("select");
-    select.setAttribute("aria-label", "Automatic adoption");
-    for (const mode of modes) {
-      const option = document.createElement("option");
-      option.value = mode;
-      option.textContent = labels[mode] || mode;
-      select.append(option);
-    }
-    select.value = state.auto_adopt_mode || "always";
+    const {select, control} = SovereignUI.selectionControl({
+      items: modes.map((mode) => [mode, labels[mode] || mode]),
+      value: state.auto_adopt_mode || "always",
+      ariaLabel: "Automatic adoption",
+      onChange: async () => {
+        renderSelection();
+        try {
+          await this._post(route.path, {
+            [route.topicKey]: topic,
+            mode: select.value,
+          });
+          await this._changed();
+        } catch (error) {
+          showToast(error.message, true);
+        }
+      },
+    });
     const description = document.createElement("p");
     description.className = "shell-note shell-auto-adopt-description";
     const renderSelection = () => {
@@ -2057,19 +2343,7 @@ Object.assign(SovereignShell, {
       }
       description.textContent = descriptions[select.value] || "";
     };
-    select.onchange = async () => {
-      renderSelection();
-      try {
-        await this._post(route.path, {
-          [route.topicKey]: topic,
-          mode: select.value,
-        });
-        await this._changed();
-      } catch (error) {
-        showToast(error.message, true);
-      }
-    };
-    row.append(indicator, select);
+    row.append(indicator, control);
     wrap.append(row, description);
     renderSelection();
     return wrap;
@@ -2151,7 +2425,7 @@ Object.assign(SovereignShell, {
       '<fieldset id="shellChannelForm" class="shell-target-form" hidden>',
       "<legend>Add channel</legend>",
       '<label for="shellChannelType">Channel type</label>',
-      '<select id="shellChannelType"></select>',
+      '<select id="shellChannelType" class="ui-select"></select>',
       '<div id="shellChannelFields" class="shell-target-form-full"></div>',
       '<div class="shell-row shell-target-form-full">',
       '<button type="button" id="shellTestChannelBtn">Test</button>',
@@ -2623,15 +2897,12 @@ Object.assign(SovereignShell, {
 
   _populateChannelTypes() {
     const select = document.getElementById("shellChannelType");
-    select.replaceChildren();
-    for (const type of (this._channelCatalog.types || []).filter(
-      (item) => item.action === "configure",
-    )) {
-      const option = document.createElement("option");
-      option.value = `${type.kind}:${type.id}`;
-      option.textContent = type.name;
-      select.append(option);
-    }
+    SovereignUI.selectOptions(
+      select,
+      (this._channelCatalog.types || [])
+        .filter((item) => item.action === "configure")
+        .map((type) => [`${type.kind}:${type.id}`, type.name]),
+    );
     this._renderChannelFields();
   },
 
