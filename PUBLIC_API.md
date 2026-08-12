@@ -164,6 +164,13 @@ preserves the detached `ProtocolNode` and adds a verified `PerspectiveSource`;
 a relative maximum age, an absolute lower timestamp, both, or neither. Core
 measures and filters these facts but does not define domain-level freshness.
 
+A projection still has to answer "is this current?" one way or the other, so
+the relative maximum age carries a default of two hours rather than leaving
+every caller to declare the same number. An explicit `max_age_seconds=None`
+removes the window and projects every verified record regardless of age; an
+explicit value replaces it. The absolute lower timestamp has no default,
+because no timestamp is a defensible one.
+
 `LastWriteWinsPolicy` lets an application declare a narrowly scoped timestamp
 rule for one node type. The declaration names the timestamp field and the data
 and parent fields that constitute the reconciled value. Passing declarations

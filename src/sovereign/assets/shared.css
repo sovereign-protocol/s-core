@@ -73,8 +73,8 @@ button.danger {
 .ui-button:disabled { cursor: default; opacity: 0.55; }
 
 /* Selection fields stay native controls: the browser owns their semantics,
-   open list and keyboard behaviour. A shared closed face keeps every app's
-   value on its surrounding surface with the same compact chevron button. */
+   open list and keyboard behaviour. Their shared closed face follows the
+   same bordered-button contract in every application. */
 .ui-selection-field {
   display: flex;
   flex-direction: column;
@@ -90,8 +90,13 @@ button.danger {
   width: 100%;
   min-width: 0;
   min-height: 34px;
+  overflow: hidden;
+  border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
+  border-radius: 6px;
   color: inherit;
   background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 .ui-select-value {
   min-width: 0;
@@ -108,8 +113,7 @@ button.danger {
   box-sizing: border-box;
   width: 34px;
   height: 34px;
-  border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
-  border-radius: 6px;
+  border: 0;
   color: var(--text-muted, var(--shell-muted, currentColor));
   background: transparent;
 }
@@ -117,15 +121,17 @@ button.danger {
   width: 13px;
   height: 13px;
 }
-.ui-select-control:hover .ui-select-toggle,
-.ui-select-control:focus-within .ui-select-toggle {
+.ui-select-control:hover,
+.ui-select-control:focus-within {
   border-color: var(--teal);
-  color: inherit;
+  background: var(--teal-soft);
 }
-.ui-select-control:focus-within .ui-select-toggle {
+.ui-select-control:focus-within {
   outline: 2px solid color-mix(in srgb, var(--teal) 35%, transparent);
   outline-offset: 1px;
 }
+.ui-select-control:hover .ui-select-toggle,
+.ui-select-control:focus-within .ui-select-toggle { color: inherit; }
 .ui-select-control[data-variant="compact"] {
   grid-template-columns: minmax(0, auto) 28px;
   width: max-content;
@@ -133,7 +139,7 @@ button.danger {
   min-height: 28px;
 }
 .ui-select-control[data-variant="compact"] .ui-select-value {
-  padding: 3px 7px 3px 2px;
+  padding: 3px 7px;
   font-size: 12px;
 }
 .ui-select-control[data-variant="compact"] .ui-select-toggle {
@@ -145,8 +151,8 @@ button.danger {
   cursor: default;
   opacity: 0.58;
 }
-.ui-select-control:has(.ui-select-native:invalid) .ui-select-toggle,
-.ui-select-control:has(.ui-select-native[aria-invalid="true"]) .ui-select-toggle {
+.ui-select-control:has(.ui-select-native:invalid),
+.ui-select-control:has(.ui-select-native[aria-invalid="true"]) {
   border-color: var(--danger);
 }
 .ui-select-control > select.ui-select-native {
@@ -161,7 +167,13 @@ button.danger {
   padding: 0 !important;
   border: 0 !important;
   opacity: 0;
+  color-scheme: inherit;
   cursor: pointer;
+}
+.ui-select-control > select.ui-select-native option,
+.ui-select-control > select.ui-select-native optgroup {
+  background: var(--surface, var(--panel, var(--shell-surface, Canvas)));
+  color: var(--text, var(--shell-text, CanvasText));
 }
 .ui-select-control > select.ui-select-native:disabled {
   cursor: default;

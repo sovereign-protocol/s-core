@@ -41,6 +41,14 @@ from .versions import CORE_PROFILE_SCHEMA_VERSION
 
 _LOCAL_REVISION_ORIGIN = object()
 
+# How stale a peer's perspective may be before its agenda records stop
+# counting as current. Core measures perspective age and assigns no domain
+# meaning to it, but a projection has to answer the question one way or the
+# other, so the safer answer is the default: an unobserved or long-silent
+# perspective is not projected. Callers wanting every verified record
+# regardless of age pass max_age_seconds=None explicitly.
+DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS = 2 * 60 * 60
+
 _CORE_PROFILE_FIELDS = frozenset({
     "type", "name", "profile_schema_version", "identity_key",
     "display_name", "picture", "attachments", "signing_key_events",
@@ -2487,13 +2495,16 @@ class Session:
         node_type: str,
         *,
         included_addresses: set[str] | None = None,
-        max_age_seconds: float | None = None,
+        max_age_seconds: float | None = (
+            DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS
+        ),
         not_before: str | float | datetime | None = None,
     ) -> list[ProjectedNode]:
         """Project verified records without adopting them.
 
         Core reports and filters factual time information supplied by the
-        caller. It assigns no universal meaning to "current".
+        caller. It assigns no universal meaning to "current" beyond the
+        default staleness window, which an explicit ``None`` removes.
         """
         threshold = self._absolute_threshold(not_before)
         local_identity = self.identity
@@ -2573,7 +2584,9 @@ class Session:
         topic_uuid: str,
         *,
         included_addresses: set[str] | None = None,
-        max_age_seconds: float | None = None,
+        max_age_seconds: float | None = (
+            DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS
+        ),
         not_before: str | float | datetime | None = None,
     ) -> list[ProjectedNode]:
         items = [
@@ -2705,7 +2718,9 @@ class Session:
         text: str,
         priority: str | None = None,
         *,
-        max_age_seconds: float | None = None,
+        max_age_seconds: float | None = (
+            DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS
+        ),
         not_before: str | float | datetime | None = None,
     ) -> SessionResult:
         if self._protocol.index.get(topic_uuid) is None:
@@ -2774,7 +2789,9 @@ class Session:
         item_uuid: str,
         index: int,
         *,
-        max_age_seconds: float | None = None,
+        max_age_seconds: float | None = (
+            DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS
+        ),
         not_before: str | float | datetime | None = None,
     ) -> SessionResult:
         item = self._agenda_item(item_uuid)
@@ -2839,7 +2856,9 @@ class Session:
         self,
         topic_uuid: str,
         *,
-        max_age_seconds: float | None = None,
+        max_age_seconds: float | None = (
+            DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS
+        ),
         not_before: str | float | datetime | None = None,
     ) -> float:
         projected = self.agenda_projection(
