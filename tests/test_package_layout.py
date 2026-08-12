@@ -105,6 +105,10 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn('event.key === "Escape"', menu)
         self.assertIn(".ui-select-control", shared_css)
         self.assertIn("select.ui-select-native", shared_css)
+        self.assertIn("border: 1px solid var(--line", shared_css)
+        self.assertIn("color-scheme: inherit", shared_css)
+        self.assertIn("select.ui-select-native option", shared_css)
+        self.assertIn("var(--surface, var(--panel, var(--shell-surface, Canvas)))", shared_css)
         self.assertIn(".ui-action-menu", shared_css)
 
     def test_shared_editable_text_owns_text_field_appearance_and_behavior(self):

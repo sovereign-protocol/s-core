@@ -11,6 +11,10 @@
 - Added application-declared `LastWriteWinsPolicy` reconciliation. Core now
   executes scoped timestamp comparison, stale-winner rejection, tie handling,
   and timestamp-only convergence without adding protocol data.
+- The perspective staleness window now defaults to two hours in Core instead
+  of being declared identically by every application. `max_age_seconds=None`
+  projects every verified record regardless of age; an explicit value still
+  overrides. The public export surface is unchanged.
 - Added verified, read-only perspective projections with provenance,
   multi-address deduplication, and caller-supplied relative and absolute time
   thresholds. Core measures perspective age but assigns no domain freshness.
