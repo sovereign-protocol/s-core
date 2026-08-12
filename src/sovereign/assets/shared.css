@@ -72,6 +72,108 @@ button.danger {
 }
 .ui-button:disabled { cursor: default; opacity: 0.55; }
 
+/* Selection fields stay native controls: the browser owns their semantics,
+   open list and keyboard behaviour. A shared closed face keeps every app's
+   value on its surrounding surface with the same compact chevron button. */
+.ui-selection-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ui-field-label { font-size: 0.85rem; }
+.ui-select-control {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  color: inherit;
+  background: transparent;
+}
+.ui-select-value {
+  min-width: 0;
+  padding: 6px 8px;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ui-select-toggle {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.4)));
+  border-radius: 6px;
+  color: var(--text-muted, var(--shell-muted, currentColor));
+  background: transparent;
+}
+.ui-select-toggle .icon-svg {
+  width: 13px;
+  height: 13px;
+}
+.ui-select-control:hover .ui-select-toggle,
+.ui-select-control:focus-within .ui-select-toggle {
+  border-color: var(--teal);
+  color: inherit;
+}
+.ui-select-control:focus-within .ui-select-toggle {
+  outline: 2px solid color-mix(in srgb, var(--teal) 35%, transparent);
+  outline-offset: 1px;
+}
+.ui-select-control[data-variant="compact"] {
+  grid-template-columns: minmax(0, auto) 28px;
+  width: max-content;
+  max-width: 100%;
+  min-height: 28px;
+}
+.ui-select-control[data-variant="compact"] .ui-select-value {
+  padding: 3px 7px 3px 2px;
+  font-size: 12px;
+}
+.ui-select-control[data-variant="compact"] .ui-select-toggle {
+  width: 28px;
+  height: 28px;
+}
+.ui-select-control[data-disabled="true"],
+.ui-select-control[data-busy="true"] {
+  cursor: default;
+  opacity: 0.58;
+}
+.ui-select-control:has(.ui-select-native:invalid) .ui-select-toggle,
+.ui-select-control:has(.ui-select-native[aria-invalid="true"]) .ui-select-toggle {
+  border-color: var(--danger);
+}
+.ui-select-control > select.ui-select-native {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100% !important;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  opacity: 0;
+  cursor: pointer;
+}
+.ui-select-control > select.ui-select-native:disabled {
+  cursor: default;
+}
+.ui-field-help,
+.ui-field-error {
+  display: block;
+  color: var(--text-muted, var(--shell-muted, #8b949e));
+  font-size: 0.78rem;
+}
+.ui-field-error { color: var(--danger); }
+
 /* Disclosure sections deliberately standardise only the header. The content
    beneath it remains entirely application-specific. */
 .ui-disclosure {
@@ -332,7 +434,7 @@ button.danger {
 }
 .ui-react-button:disabled { cursor: default; opacity: 0.55; }
 
-.ui-reaction-menu {
+.ui-action-menu {
   position: fixed;
   z-index: 1200;
   display: flex;
@@ -345,8 +447,8 @@ button.danger {
   background: var(--surface, var(--shell-surface, #1b2027));
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
 }
-.ui-reaction-menu[hidden] { display: none; }
-.ui-reaction-menu-option {
+.ui-action-menu[hidden] { display: none; }
+.ui-action-menu-option {
   padding: 6px 10px;
   border: 0;
   border-radius: 6px;
@@ -355,9 +457,16 @@ button.danger {
   font-size: 13px;
   text-align: left;
 }
-.ui-reaction-menu-option:hover,
-.ui-reaction-menu-option:focus-visible {
+.ui-action-menu-option:hover,
+.ui-action-menu-option:focus-visible {
   background: var(--teal-soft);
+}
+.ui-action-menu-option:disabled { cursor: default; opacity: 0.6; }
+.ui-action-menu-option.is-danger { color: var(--danger); }
+.ui-action-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line, var(--shell-border, rgba(127, 127, 127, 0.35)));
 }
 
 .icon-btn {
@@ -1195,9 +1304,13 @@ dialog menu .danger:not(:last-child) {
   position: relative;
 }
 .shell-agenda-item.has-drag {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  padding-left: 5px;
 }
-.shell-pane .ui-reorder-handle {
+.shell-pane .shell-agenda-item .ui-reorder-handle {
+  min-width: 22px;
+  width: 22px;
+  padding-inline: 1px;
   border-color: transparent;
   background: transparent;
   color: var(--shell-muted);
@@ -1207,20 +1320,18 @@ dialog menu .danger:not(:last-child) {
 .shell-agenda-item[data-priority="low"] { border-left-color: #60a5fa; }
 .shell-agenda-text { min-width: 0; overflow-wrap: anywhere; }
 .shell-agenda-text.ui-editable-text { margin: -4px 0; }
+.shell-agenda-item.has-drag .shell-agenda-text.ui-editable-text { padding-left: 3px; }
 .shell-agenda-actions {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-}
-.shell-agenda-priority-control {
-  min-width: 92px;
-  padding: 4px 6px !important;
+  gap: 8px;
 }
 .shell-agenda-priority-label {
   color: var(--shell-muted);
   font-size: 12px;
   white-space: nowrap;
 }
+.shell-agenda-actions .shell-peer-avatar { margin-left: 2px; }
 .shell-agenda-delete { color: #f87171; }
 /* Destructive actions stay out of the way until the row is active. Priority
    remains visible because it is meaningful agenda information. */
@@ -1267,7 +1378,7 @@ dialog menu .danger:not(:last-child) {
   gap: 10px;
   align-items: center;
 }
-.shell-auto-adopt-row select {
+.shell-auto-adopt-row .ui-select-control {
   width: 100%;
 }
 .shell-auto-adopt-indicator {
