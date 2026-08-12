@@ -13,9 +13,9 @@ FIXTURES = Path(__file__).with_name("fixtures")
 
 
 class ProtocolConformanceTests(unittest.TestCase):
-    def test_protocol_tree_v3_golden_fixture_roundtrips_exactly(self):
+    def test_protocol_tree_v4_golden_fixture_roundtrips_exactly(self):
         payload = json.loads(
-            (FIXTURES / "protocol_tree_v3.json").read_text(encoding="utf-8")
+            (FIXTURES / "protocol_tree_v4.json").read_text(encoding="utf-8")
         )
 
         node = protocol_node_from_envelope(payload)
@@ -27,7 +27,7 @@ class ProtocolConformanceTests(unittest.TestCase):
 
     def test_protocol_envelope_rejects_missing_or_unknown_version(self):
         payload = json.loads(
-            (FIXTURES / "protocol_tree_v3.json").read_text(encoding="utf-8")
+            (FIXTURES / "protocol_tree_v4.json").read_text(encoding="utf-8")
         )
         payload.pop("protocol_schema_version")
 
@@ -47,6 +47,11 @@ class ProtocolConformanceTests(unittest.TestCase):
             protocol_node_from_envelope(payload)
         payload = json.loads(
             (FIXTURES / "protocol_tree_v2.json").read_text(encoding="utf-8")
+        )
+        with self.assertRaises(UnsupportedProtocolVersion):
+            protocol_node_from_envelope(payload)
+        payload = json.loads(
+            (FIXTURES / "protocol_tree_v3.json").read_text(encoding="utf-8")
         )
         with self.assertRaises(UnsupportedProtocolVersion):
             protocol_node_from_envelope(payload)

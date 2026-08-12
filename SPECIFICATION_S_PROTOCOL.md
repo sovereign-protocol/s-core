@@ -11,7 +11,7 @@ The following versions are independent and must not share a wire field:
 | Domain | Current field/value | Status |
 |---|---|---|
 | Python distribution | `0.1.8` | implemented |
-| Protocol tree envelope | `protocol_schema_version: 3` | implemented |
+| Protocol tree envelope | `protocol_schema_version: 4` | implemented |
 | Session persistence envelope | `format: sovereign-session`, `version: 2` | implemented |
 | Connect token | `token_version: 3` | implemented |
 | Channel descriptor | `descriptor_version: 1` | implemented |
@@ -73,7 +73,7 @@ Every subtree crossing a channel uses:
 
 ```json
 {
-  "protocol_schema_version": 3,
+  "protocol_schema_version": 4,
   "subtree": {"...": "Protocol node"},
   "parent_uuid": null
 }

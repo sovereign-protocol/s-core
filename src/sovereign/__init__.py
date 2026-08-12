@@ -17,6 +17,10 @@ from .protocol import (
     ProtocolNode, ProtocolResult, ProtocolState, UnsupportedProtocolVersion,
     protocol_node_from_envelope, protocol_tree_envelope,
 )
+from .perspective import (
+    PerspectiveObservation, PerspectiveSource, ProjectedNode,
+)
+from .reconciliation import LastWriteWinsPolicy
 from .session import Session, SessionEffect, SessionResult
 from .relay_storage import RelayStorage
 from .topic_registry import ApplicationRegistration
@@ -27,8 +31,9 @@ __all__ = [
     "ApplicationManifest", "ApplicationRegistration", "ApplicationResultView",
     "ApplicationServices", "ApplicationSpec", "BlobChannel", "Channel",
     "ChannelAcceptance", "ChannelResult", "IncompatibleApplicationFacade",
-    "Invitation", "LivenessChannel", "ManagedChannel",
+    "Invitation", "LastWriteWinsPolicy", "LivenessChannel", "ManagedChannel",
     "PairingChannel", "PollCycleResult",
+    "PerspectiveObservation", "PerspectiveSource", "ProjectedNode",
     "PollingChannel", "PollingEndpoint", "ProtocolNode", "ProtocolResult",
     "ProtocolState", "RelayStorage",
     "Session", "SessionEffect", "SessionResult", "UnsupportedProtocolVersion",

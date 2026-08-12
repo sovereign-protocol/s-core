@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Fixed identity/profile resolution across multiple addresses choosing the
+  first cached copy. Agenda and other author avatars now use the highest
+  verified revision; invalid higher-sequence copies cannot replace it.
+- Identity lookup and read-only projections now share one revision-candidate
+  resolver. Logical sequences are compared only within an origin; duplicate
+  sources are merged and cross-origin conflicts remain explicit.
+- Added application-declared `LastWriteWinsPolicy` reconciliation. Core now
+  executes scoped timestamp comparison, stale-winner rejection, tie handling,
+  and timestamp-only convergence without adding protocol data.
+- Added verified, read-only perspective projections with provenance,
+  multi-address deduplication, and caller-supplied relative and absolute time
+  thresholds. Core measures perspective age but assigns no domain freshness.
+- Agenda views now project author-owned records across connected perspectives;
+  only locally authored agenda records are persisted or mutable. Ordering uses
+  wide fractional gaps and never rewrites a foreign perspective.
+- Protocol schema 4 is a clean break; schema 3 sessions and wire envelopes are
+  rejected without migration.
+
 - Added an application-facing `join_bridged_topic` operation for taking up a
   shared topic bidirectionally. Mailbox channels persist both receive consent
   and the future topic assignment before the first local replica arrives.

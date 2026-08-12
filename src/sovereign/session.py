@@ -14,6 +14,7 @@ import threading
 import uuid as uuid_mod
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable
 
@@ -23,6 +24,11 @@ from .protocol import (
     ProtocolNode, ProtocolState, collect_subtree_uuids,
     protocol_tree_envelope, stable_hash,
 )
+from .perspective import (
+    PerspectiveObservation, PerspectiveSource, ProjectedNode,
+    _RevisionCandidate, _resolve_revision_candidates,
+)
+from .reconciliation import LastWriteWinsPolicy
 from .signing import (
     activation_event, generate_keypair, key_id_for_public_key,
     public_key_for_private_key,
@@ -163,6 +169,7 @@ class ReadOnlyProtocolView:
 
 class Session:
     ORDER_GAP_EPSILON = 1e-9
+    AGENDA_ORDER_STRIDE = 1024.0
     MUTATION_HISTORY_LIMIT = 512
     # Another client of this same user caches its version of a topic under an
     # address with this prefix. It is not a peer address and must never be
@@ -201,6 +208,11 @@ class Session:
         self._mutation_results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._peer_topic_sets: dict[str, set[str]] = {}
         self._peer_perspectives: dict[str, ProtocolNode] = {}
+        # Runtime-only observation facts. Channels report age; applications
+        # decide what age is acceptable for each use of a perspective.
+        self._perspective_observations: dict[
+            tuple[str, str], PerspectiveObservation
+        ] = {}
         # Which channel type last successfully delivered to/from a peer
         # address - purely informational (the only transport-shaped thing
         # an app is allowed to surface to its UI, per the connect-channel
@@ -366,6 +378,46 @@ class Session:
             for address in addresses
             if (tree := self._peer_perspectives.get(address)) is not None
         }
+
+    @_session_locked
+    def observe_peer_perspective(
+        self,
+        peer_addr: str,
+        topic_uuid: str,
+        *,
+        source_age_seconds: float | None = None,
+        source_timestamp: float | None = None,
+        channel_kind: str | None = None,
+    ) -> None:
+        """Record runtime facts without assigning domain meaning to age."""
+        if not peer_addr or not topic_uuid:
+            return
+        normalized_age = (
+            max(0.0, float(source_age_seconds))
+            if source_age_seconds is not None else None
+        )
+        normalized_timestamp = (
+            float(source_timestamp) if source_timestamp is not None else None
+        )
+        self._perspective_observations[(peer_addr, topic_uuid)] = (
+            PerspectiveObservation(
+                address=peer_addr,
+                topic_uuid=topic_uuid,
+                observed_monotonic=time.monotonic(),
+                observed_at=datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds",
+                ),
+                source_age_seconds=normalized_age,
+                source_timestamp=normalized_timestamp,
+                channel_kind=channel_kind,
+            )
+        )
+
+    @_session_locked
+    def perspective_observation(
+        self, peer_addr: str, topic_uuid: str,
+    ) -> PerspectiveObservation | None:
+        return self._perspective_observations.get((peer_addr, topic_uuid))
 
     @_session_locked
     def peer_identity_key_for_address(self, peer_addr: str) -> str | None:
@@ -750,21 +802,74 @@ class Session:
         return self.shared_topics.invitation_requires_mount(tree)
 
     def find_peer_identity(self, identity_key: str) -> ProtocolNode | None:
-        # Searches across every cached peer perspective's values, not one
-        # peer's cache keyed by address - this is what lets identity survive
-        # a peer's address changing, since lookup never depends on which
-        # dict key the matching tree happens to be cached under.
-        for tree in self._peer_perspectives.values():
-            found = self._find_identity_in_tree(tree, identity_key)
-            if found:
-                return found
-        return None
+        """Return the newest authenticated profile across all addresses.
+
+        One identity may be visible through several relays or devices. Cache
+        insertion/address order is not revision order, so selecting the first
+        copy can indefinitely retain an old name or avatar.
+        """
+        candidates = [
+            _RevisionCandidate(
+                found,
+                address,
+                self._identity_profile_is_self_verified(found),
+            )
+            for address, tree in self._peer_perspectives.items()
+            if (found := self._find_identity_in_tree(tree, identity_key))
+        ]
+        # Unsigned profiles can exist in an in-memory cache created by an
+        # older embedding or test double. They remain readable only when no
+        # authenticated candidate exists; they can never outrank one.
+        resolved = _resolve_revision_candidates(
+            candidates, allow_unverified_fallback=True,
+        )
+        return resolved.node if resolved else None
+
+    def _identity_profile_is_self_verified(self, profile: ProtocolNode) -> bool:
+        identity_key = profile.data.get("identity_key")
+        if (
+            not isinstance(identity_key, str)
+            or not identity_key
+            or profile.revision_origin != identity_key
+            or _core_profile_schema_error(dict(profile.data))
+        ):
+            return False
+        known, active, error = resolve_key_events(
+            profile.data.get("signing_key_events"),
+        )
+        if error or profile.revision_key_id not in active:
+            return False
+        public_key = known.get(profile.revision_key_id)
+        if public_key is None or not verify_revision(profile, public_key):
+            return False
+        events = profile.data.get("signing_key_events")
+        trusted = self._trusted_signing_key_events.get(identity_key)
+        if trusted is None:
+            return True
+        # Stale and newer profiles may carry a prefix or extension of the
+        # trusted chain. A competing self-signed chain using the same public
+        # identity key is not an authenticated revision of that identity.
+        return (
+            events == trusted
+            or (
+                len(events) < len(trusted)
+                and events == trusted[:len(events)]
+            )
+            or (
+                len(trusted) < len(events)
+                and trusted == events[:len(trusted)]
+            )
+        )
 
     def peer_identity(self, peer_addr: str) -> ProtocolNode | None:
-        # Address-scoped lookup: the bootstrap step for going from "a peer
-        # address we're tracking" to "their identity" - find_peer_identity
-        # alone can't do this once it's keyed by identity_key instead of
-        # address, since a bare address gives no identity_key to search for.
+        # The address bootstraps identity-key discovery. Once known, resolve
+        # across every alias/device so all routes expose the same newest
+        # authenticated profile instead of their independently cached copy.
+        identity_key = self._peer_identity_key.get(peer_addr)
+        if identity_key:
+            resolved = self.find_peer_identity(identity_key)
+            if resolved is not None:
+                return resolved
         tree = self._peer_perspectives.get(peer_addr)
         return self._find_identity_in_tree(tree) if tree else None
 
@@ -1007,6 +1112,29 @@ class Session:
     def export_protocol_root(self) -> dict:
         return self._protocol.root.to_dict()
 
+    @_session_locked
+    def export_persistence_protocol_root(self) -> dict:
+        """Persist this client's agenda, never cached/adopted peer agendas."""
+        identity = self.identity
+        root = ProtocolNode.from_dict(self._protocol.root.to_dict())
+        identity_key = str(identity.data.get("identity_key") or "")
+
+        def retain(node: ProtocolNode) -> None:
+            kept = []
+            for child in node.children:
+                if child.data.get("type") == "agenda_item" and not (
+                    child.data.get("author") == identity.uuid
+                    and child.revision_origin == identity_key
+                ):
+                    continue
+                retain(child)
+                kept.append(child)
+            node.children = kept
+
+        retain(root)
+        root.refresh_hashes_deep()
+        return root.to_dict()
+
     def root_uuid(self) -> str:
         return self._protocol.root.uuid
 
@@ -1159,6 +1287,9 @@ class Session:
     def apply_peer_subtree(self, peer_addr: str,
                            subtree: ProtocolNode,
                            parent_uuid: str | None) -> None:
+        for topic_uuid in self._peer_topic_sets.get(peer_addr, set()):
+            if subtree.uuid == topic_uuid or self._find_in_tree(subtree, topic_uuid):
+                self.observe_peer_perspective(peer_addr, topic_uuid)
         # Identity topics are always applied with the profile node as the
         # subtree root (connect-token snapshot, direct profile pull, relay
         # poll alike), so a root-only check is enough to make this the one
@@ -1343,6 +1474,7 @@ class Session:
         less.
         """
         tree = self._peer_perspectives.get(peer_addr)
+        self._perspective_observations.pop((peer_addr, topic_uuid), None)
         if not tree:
             return False
         if tree.uuid == topic_uuid:
@@ -1699,18 +1831,86 @@ class Session:
             return self.delete(node_uuid)
         return self.accept_peer_node(peer_addr, node_uuid)
 
+    @classmethod
+    def _last_write_wins_resolution(
+        cls,
+        local_node: ProtocolNode | None,
+        peer_node: ProtocolNode | None,
+        policies: tuple[LastWriteWinsPolicy, ...],
+    ) -> tuple[LastWriteWinsPolicy, bool, int | None] | None:
+        """Return policy, timestamp-only flag, and peer timestamp ordering.
+
+        Ordering is ``1`` when the peer is newer, ``-1`` when local is newer,
+        ``0`` for an exact tie, and ``None`` when a declared timestamp cannot
+        be interpreted. An applicable but unordered policy deliberately
+        blocks the generic classifier: malformed clocks must not silently
+        become last-write-wins through some unrelated fallback.
+        """
+
+        if local_node is None or peer_node is None:
+            return None
+        for policy in policies:
+            if (
+                local_node.data.get("type") != policy.node_type
+                or peer_node.data.get("type") != policy.node_type
+                or local_node.deleted != peer_node.deleted
+                or local_node.weights != peer_node.weights
+            ):
+                continue
+            if (
+                not policy.include_parent
+                and local_node.parent_uuid != peer_node.parent_uuid
+            ):
+                continue
+
+            local_data = dict(local_node.data)
+            peer_data = dict(peer_node.data)
+            local_timestamp = local_data.pop(policy.timestamp_field, None)
+            peer_timestamp = peer_data.pop(policy.timestamp_field, None)
+            semantic_difference = (
+                policy.include_parent
+                and local_node.parent_uuid != peer_node.parent_uuid
+            )
+            for field_name in policy.data_fields:
+                local_value = local_data.pop(field_name, None)
+                peer_value = peer_data.pop(field_name, None)
+                semantic_difference = (
+                    semantic_difference or local_value != peer_value
+                )
+            if local_data != peer_data:
+                continue
+
+            timestamp_only = not semantic_difference
+            if timestamp_only and not policy.settle_timestamp_only:
+                continue
+            if local_timestamp in (None, "") and policy.fallback_to_updated_at:
+                local_timestamp = local_node.updated_at
+            if peer_timestamp in (None, "") and policy.fallback_to_updated_at:
+                peer_timestamp = peer_node.updated_at
+            try:
+                local_clock = cls._absolute_threshold(local_timestamp)
+                peer_clock = cls._absolute_threshold(peer_timestamp)
+            except (TypeError, ValueError):
+                return policy, timestamp_only, None
+            if local_clock is None or peer_clock is None:
+                return policy, timestamp_only, None
+            order = 1 if peer_clock > local_clock else -1 if local_clock > peer_clock else 0
+            return policy, timestamp_only, order
+        return None
+
     @_session_locked
     def reconcile_peer_changes(
         self,
         peer_addr: str,
         topic_uuid: str,
         node_is_eligible: Callable[[ProtocolNode, str], bool] | None = None,
+        reconciliation_policies: tuple[LastWriteWinsPolicy, ...] = (),
     ) -> bool:
         # Generic "adopt incoming changes" walk - every app on this protocol
         # wants the same thing (adopt whatever a peer changed for one topic).
-        # The only genuinely app-specific input is which individual nodes are
-        # eligible to auto-adopt (node_is_eligible); shallow-vs-graft is
-        # decided per node by accept_peer_node from the event type.
+        # Applications declare eligibility and optional structured conflict
+        # policies. Core owns their execution, stale-winner rejection and
+        # adoption; shallow-vs-graft is decided by accept_peer_node.
         node_is_eligible = node_is_eligible or (lambda node, event_type: True)
 
         peer_topic = self.get_cached_peer_subtree(peer_addr, topic_uuid)
@@ -1753,15 +1953,47 @@ class Session:
         # decide to overwrite an unrelated local descendant change.
         changed = False
         for event in peer_events:
-            if event["type"] not in ("peer_made_changes", "local_missing_node"):
-                continue
             peer_node = self.get_cached_peer_subtree(peer_addr, event["node_uuid"])
             local_node = self._protocol.index.get(event["node_uuid"])
             reference_node = local_node or peer_node
             if not reference_node:
                 continue
-            if not node_is_eligible(reference_node, event["type"]):
-                continue
+            lww = self._last_write_wins_resolution(
+                local_node, peer_node, reconciliation_policies,
+            )
+            if lww is not None:
+                policy, timestamp_only, peer_order = lww
+                self.trace_event(
+                    "session.reconcile_policy",
+                    peer_addr=peer_addr,
+                    topic_uuid=topic_uuid,
+                    node_uuid=event["node_uuid"],
+                    event_type=event["type"],
+                    policy=policy.to_dict(),
+                    timestamp_only=timestamp_only,
+                    winner=(
+                        "peer" if peer_order == 1
+                        else "local" if peer_order == -1
+                        else "tie" if peer_order == 0
+                        else "unresolved"
+                    ),
+                )
+                # Timestamp-only differences carry no application meaning.
+                # Settling them is normalization, not adoption policy. A real
+                # semantic difference still passes through the application's
+                # explicit eligibility decision.
+                if peer_order != 1 or (
+                    not timestamp_only
+                    and not node_is_eligible(reference_node, event["type"])
+                ):
+                    continue
+            else:
+                if event["type"] not in (
+                    "peer_made_changes", "local_missing_node",
+                ):
+                    continue
+                if not node_is_eligible(reference_node, event["type"]):
+                    continue
             self.trace_event(
                 "session.reconcile_node",
                 peer_addr=peer_addr,
@@ -2001,6 +2233,9 @@ class Session:
         # stays true after teardown.
         self._peer_topic_sets.pop(peer_addr, None)
         self._peer_perspectives.pop(peer_addr, None)
+        for key in tuple(self._perspective_observations):
+            if key[0] == peer_addr:
+                self._perspective_observations.pop(key, None)
         self.peer_topic_channel.pop(peer_addr, None)
 
     @_session_locked
@@ -2234,10 +2469,245 @@ class Session:
         return SessionResult("ok", value=node.uuid, effects=effects)
 
     def agenda_items(self, topic_uuid: str) -> list[ProtocolNode]:
-        return self._ordered_children(topic_uuid, "agenda_item")
+        """Agenda records stored in this client's own perspective."""
+        identity = self.identity
+        identity_key = str(identity.data.get("identity_key") or "")
+        return [
+            item for item in self._ordered_children(topic_uuid, "agenda_item")
+            if (
+                item.data.get("author") == identity.uuid
+                and item.revision_origin == identity_key
+            )
+        ]
 
-    def create_agenda_item(self, topic_uuid: str, text: str,
-                           priority: str | None = None) -> SessionResult:
+    @_session_locked
+    def project_nodes(
+        self,
+        topic_uuid: str,
+        node_type: str,
+        *,
+        included_addresses: set[str] | None = None,
+        max_age_seconds: float | None = None,
+        not_before: str | float | datetime | None = None,
+    ) -> list[ProjectedNode]:
+        """Project verified records without adopting them.
+
+        Core reports and filters factual time information supplied by the
+        caller. It assigns no universal meaning to "current".
+        """
+        threshold = self._absolute_threshold(not_before)
+        local_identity = self.identity
+        local_key = str(local_identity.data.get("identity_key") or "")
+        candidates: dict[str, list[tuple[ProtocolNode, PerspectiveSource]]] = {}
+
+        local_topic = self._protocol.index.get(topic_uuid)
+        if local_topic is not None:
+            source = PerspectiveSource(
+                identity_uuid=local_identity.uuid,
+                identity_key=local_key,
+                addresses=(self.address,),
+                local=True,
+                age_seconds=0.0,
+                observed_at=None,
+                source_timestamp=None,
+                channel_kind=None,
+            )
+            self._collect_projected_candidates(
+                local_topic, node_type, source, candidates,
+            )
+
+        permitted = included_addresses
+        for address in self.peer_addresses(topic_uuid):
+            if permitted is not None and address not in permitted:
+                continue
+            tree = self._peer_perspectives.get(address)
+            topic = self._find_in_tree(tree, topic_uuid) if tree else None
+            if topic is None:
+                continue
+            identity_key = str(self._peer_identity_key.get(address) or "")
+            identity = (
+                self.find_peer_identity(identity_key) if identity_key else None
+            ) or self.peer_identity(address)
+            if identity is None:
+                continue
+            identity_key = str(identity.data.get("identity_key") or identity_key)
+            if not identity_key:
+                continue
+            observation = self._perspective_observations.get(
+                (address, topic_uuid),
+            )
+            age = self._perspective_age(observation)
+            if max_age_seconds is not None and (
+                age is None or age > max(0.0, float(max_age_seconds))
+            ):
+                continue
+            reference_time = self._perspective_reference_time(observation)
+            if threshold is not None and (
+                reference_time is None or reference_time < threshold
+            ):
+                continue
+            source = PerspectiveSource(
+                identity_uuid=identity.uuid,
+                identity_key=identity_key,
+                addresses=(address,),
+                local=False,
+                age_seconds=age,
+                observed_at=observation.observed_at if observation else None,
+                source_timestamp=(
+                    observation.source_timestamp if observation else None
+                ),
+                channel_kind=observation.channel_kind if observation else None,
+            )
+            self._collect_projected_candidates(
+                topic, node_type, source, candidates,
+            )
+
+        resolved = [
+            self._projected_node_from_candidates(values)
+            for _uuid, values in sorted(candidates.items())
+        ]
+        return [item for item in resolved if not item.node.deleted]
+
+    def agenda_projection(
+        self,
+        topic_uuid: str,
+        *,
+        included_addresses: set[str] | None = None,
+        max_age_seconds: float | None = None,
+        not_before: str | float | datetime | None = None,
+    ) -> list[ProjectedNode]:
+        items = [
+            item for item in self.project_nodes(
+                topic_uuid,
+                "agenda_item",
+                included_addresses=included_addresses,
+                max_age_seconds=max_age_seconds,
+                not_before=not_before,
+            )
+            if (
+                item.data.get("author") == item.perspective.identity_uuid
+                and item.node.parent_uuid == topic_uuid
+            )
+        ]
+        return sorted(
+            items,
+            key=lambda item: (
+                self._child_order(item.node, 0.0),
+                item.perspective.identity_key,
+                item.created_at,
+                item.uuid,
+            ),
+        )
+
+    def _collect_projected_candidates(
+        self,
+        topic: ProtocolNode,
+        node_type: str,
+        source: PerspectiveSource,
+        candidates: dict[str, list[tuple[ProtocolNode, PerspectiveSource]]],
+    ) -> None:
+        for node in self._flatten_by_uuid(topic).values():
+            if (
+                node.data.get("type") != node_type
+                or node.revision_origin != source.identity_key
+                or self.revision_verification(node) != "valid"
+            ):
+                continue
+            candidates.setdefault(node.uuid, []).append((node, source))
+
+    def _projected_node_from_candidates(
+        self, values: list[tuple[ProtocolNode, PerspectiveSource]],
+    ) -> ProjectedNode:
+        resolved = _resolve_revision_candidates([
+            _RevisionCandidate(node, source, True)
+            for node, source in values
+        ])
+        if resolved is None:  # all collected projection candidates are valid
+            raise ValueError("projection has no verified revision candidate")
+        node = resolved.node
+        matching = list(resolved.sources)
+        selected = matching[0]
+        addresses = tuple(sorted({
+            address for source in matching for address in source.addresses
+        }))
+        source = PerspectiveSource(
+            identity_uuid=selected.identity_uuid,
+            identity_key=selected.identity_key,
+            addresses=addresses,
+            local=any(item.local for item in matching),
+            age_seconds=min(
+                (item.age_seconds for item in matching if item.age_seconds is not None),
+                default=None,
+            ),
+            observed_at=max(
+                (item.observed_at for item in matching if item.observed_at),
+                default=None,
+            ),
+            source_timestamp=max(
+                (
+                    item.source_timestamp for item in matching
+                    if item.source_timestamp is not None
+                ),
+                default=None,
+            ),
+            channel_kind=next(
+                (item.channel_kind for item in matching if item.channel_kind),
+                None,
+            ),
+        )
+        return ProjectedNode(
+            self._snapshot_node(node), source, resolved.conflict,
+        )
+
+    @staticmethod
+    def _perspective_age(
+        observation: PerspectiveObservation | None,
+    ) -> float | None:
+        if observation is None:
+            return None
+        elapsed = max(0.0, time.monotonic() - observation.observed_monotonic)
+        return (observation.source_age_seconds or 0.0) + elapsed
+
+    @staticmethod
+    def _perspective_reference_time(
+        observation: PerspectiveObservation | None,
+    ) -> float | None:
+        if observation is None:
+            return None
+        if observation.source_timestamp is not None:
+            return observation.source_timestamp
+        try:
+            return datetime.fromisoformat(observation.observed_at).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _absolute_threshold(
+        value: str | float | datetime | None,
+    ) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            normalized = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        elif isinstance(value, str):
+            normalized = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            raise ValueError("not_before must be an ISO timestamp or epoch seconds")
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        return normalized.timestamp()
+
+    def create_agenda_item(
+        self,
+        topic_uuid: str,
+        text: str,
+        priority: str | None = None,
+        *,
+        max_age_seconds: float | None = None,
+        not_before: str | float | datetime | None = None,
+    ) -> SessionResult:
         if self._protocol.index.get(topic_uuid) is None:
             return SessionResult("error", reason="topic not found")
         normalized = str(text or "").strip()
@@ -2250,7 +2720,11 @@ class Session:
                 "text": normalized,
                 "priority": priority if priority in self.AGENDA_PRIORITIES else None,
                 "author": self.identity.uuid,
-                "order": self.next_child_order(topic_uuid, "agenda_item"),
+                "order": self._next_agenda_order(
+                    topic_uuid,
+                    max_age_seconds=max_age_seconds,
+                    not_before=not_before,
+                ),
             },
             {},
         )
@@ -2259,7 +2733,7 @@ class Session:
         item = self._agenda_item(item_uuid)
         if item is None:
             return SessionResult("error", reason="agenda item not found")
-        if item.data.get("author") != self.identity.uuid:
+        if not self._is_local_agenda_item(item):
             return SessionResult(
                 "error", reason="only the topic originator can delete it",
             )
@@ -2271,7 +2745,7 @@ class Session:
         item = self._agenda_item(item_uuid)
         if item is None:
             return SessionResult("error", reason="agenda item not found")
-        if item.data.get("author") != self.identity.uuid:
+        if not self._is_local_agenda_item(item):
             return SessionResult(
                 "error", reason="only the topic originator can edit it",
             )
@@ -2287,7 +2761,7 @@ class Session:
         item = self._agenda_item(item_uuid)
         if item is None:
             return SessionResult("error", reason="agenda item not found")
-        if item.data.get("author") != self.identity.uuid:
+        if not self._is_local_agenda_item(item):
             return SessionResult(
                 "error", reason="only the topic originator can set its priority",
             )
@@ -2295,10 +2769,125 @@ class Session:
         data["priority"] = priority if priority in self.AGENDA_PRIORITIES else None
         return self.modify(item.uuid, data, item.weights)
 
-    def move_agenda_item(self, item_uuid: str, index: int) -> SessionResult:
-        if self._agenda_item(item_uuid) is None:
+    def move_agenda_item(
+        self,
+        item_uuid: str,
+        index: int,
+        *,
+        max_age_seconds: float | None = None,
+        not_before: str | float | datetime | None = None,
+    ) -> SessionResult:
+        item = self._agenda_item(item_uuid)
+        if item is None:
             return SessionResult("error", reason="agenda item not found")
-        return self.move_child_to_index(item_uuid, index)
+        if not self._is_local_agenda_item(item):
+            return SessionResult(
+                "error", reason="only locally authored agenda items can be moved",
+            )
+        projected = self.agenda_projection(
+            item.parent_uuid,
+            max_age_seconds=max_age_seconds,
+            not_before=not_before,
+        )
+        siblings = [entry for entry in projected if entry.uuid != item_uuid]
+        bounded = max(0, min(int(index), len(siblings)))
+        left = bounded
+        while left > 0 and siblings[left - 1].perspective.local:
+            left -= 1
+        right = bounded
+        while right < len(siblings) and siblings[right].perspective.local:
+            right += 1
+        arranged = [
+            *siblings[left:bounded],
+            ProjectedNode(
+                self._snapshot_node(item),
+                PerspectiveSource(
+                    self.identity.uuid,
+                    str(self.identity.data.get("identity_key") or ""),
+                    (self.address,), True, 0.0, None, None, None,
+                ),
+            ),
+            *siblings[bounded:right],
+        ]
+        low = (
+            self._child_order(siblings[left - 1].node, 0.0)
+            if left > 0 else None
+        )
+        high = (
+            self._child_order(siblings[right].node, 0.0)
+            if right < len(siblings) else None
+        )
+        orders = self._spread_agenda_orders(len(arranged), low, high)
+        if orders is None:
+            return SessionResult(
+                "error", reason="no representable order between surrounding agenda items",
+            )
+        effects: list[SessionEffect] = []
+        for projected_item, order in zip(arranged, orders):
+            local = self._protocol.index.get(projected_item.uuid)
+            if local is None or not self._is_local_agenda_item(local):
+                continue
+            data = dict(local.data)
+            data["order"] = order
+            changed = self.modify(local.uuid, data, local.weights)
+            if changed.status != "ok":
+                return changed
+            effects.extend(changed.effects)
+        return SessionResult("ok", value=item_uuid, effects=effects)
+
+    def _next_agenda_order(
+        self,
+        topic_uuid: str,
+        *,
+        max_age_seconds: float | None = None,
+        not_before: str | float | datetime | None = None,
+    ) -> float:
+        projected = self.agenda_projection(
+            topic_uuid,
+            max_age_seconds=max_age_seconds,
+            not_before=not_before,
+        )
+        if not projected:
+            return 0.0
+        return max(
+            self._child_order(item.node, index)
+            for index, item in enumerate(projected)
+        ) + self.AGENDA_ORDER_STRIDE
+
+    def _spread_agenda_orders(
+        self, count: int, low: float | None, high: float | None,
+    ) -> list[float] | None:
+        if count <= 0:
+            return []
+        if low is None and high is None:
+            return [self.AGENDA_ORDER_STRIDE * index for index in range(count)]
+        if low is None:
+            return [
+                high - self.AGENDA_ORDER_STRIDE * (count - index)
+                for index in range(count)
+            ]
+        if high is None:
+            return [
+                low + self.AGENDA_ORDER_STRIDE * (index + 1)
+                for index in range(count)
+            ]
+        gap = (high - low) / (count + 1)
+        if gap <= self.ORDER_GAP_EPSILON:
+            return None
+        orders = [low + gap * (index + 1) for index in range(count)]
+        if not all(low < order < high for order in orders):
+            return None
+        if len(set(orders)) != len(orders):
+            return None
+        return orders
+
+    def _is_local_agenda_item(self, item: ProtocolNode) -> bool:
+        identity = self.identity
+        return (
+            item.data.get("type") == "agenda_item"
+            and item.data.get("author") == identity.uuid
+            and item.revision_origin == identity.data.get("identity_key")
+        )
 
     def _agenda_item(self, item_uuid: str) -> ProtocolNode | None:
         node = self._protocol.index.get(item_uuid)

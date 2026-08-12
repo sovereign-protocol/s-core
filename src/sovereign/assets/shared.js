@@ -1804,6 +1804,12 @@ Object.assign(SovereignShell, {
                     priority: null,
                     author: draft.identity_uuid || "",
                   },
+                  perspective: {
+                    identity_uuid: draft.identity_uuid || "",
+                    local: true,
+                    addresses: [],
+                    conflict: false,
+                  },
                 },
               ];
             }
@@ -1849,7 +1855,9 @@ Object.assign(SovereignShell, {
   _agendaRow(item) {
     const state = this._options.state ? this._options.state() : {};
     const me = state.identity_uuid || (state.user_profile && state.user_profile.uuid) || "";
-    const mine = item.data.author === me;
+    const mine = item.perspective
+      ? item.perspective.local === true
+      : item.data.author === me;
     const routes = this._agendaRoutes();
 
     const row = document.createElement("div");
@@ -1947,8 +1955,9 @@ Object.assign(SovereignShell, {
       actions.append(priority);
     }
 
-    const identity = this._identityFor(item.data.author);
-    actions.append(this._identityAvatar(identity, item.data.author));
+    const sourceIdentity = item.perspective?.identity_uuid || item.data.author;
+    const identity = this._identityFor(sourceIdentity);
+    actions.append(this._identityAvatar(identity, sourceIdentity));
     row.append(actions);
     return row;
   },

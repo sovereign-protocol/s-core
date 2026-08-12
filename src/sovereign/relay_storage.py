@@ -119,6 +119,9 @@ class RelayStorage(Protocol):
     def delete_blob_lease(self, blob_id: str, peer_id: str) -> None: ...
     def list_blob_leases(self) -> dict[str, list[dict]]: ...
     def read_head(self, topic_uuid: str, peer_id: str) -> dict | None: ...
+    def read_head_with_mtime(
+        self, topic_uuid: str, peer_id: str,
+    ) -> tuple[dict | None, float | None]: ...
     def read_snapshot(
         self, topic_uuid: str, peer_id: str, state_hash: str,
     ) -> dict | None: ...
@@ -264,6 +267,14 @@ class LocalFolderRelayStorage:
 
     def read_head(self, topic_uuid: str, peer_id: str) -> dict | None:
         return self._read_json(self._peer_dir(topic_uuid, peer_id) / "head.json")
+
+    def read_head_with_mtime(
+        self, topic_uuid: str, peer_id: str,
+    ) -> tuple[dict | None, float | None]:
+        path = self._peer_dir(topic_uuid, peer_id) / "head.json"
+        if not path.is_file():
+            return None, None
+        return self._read_json(path), path.stat().st_mtime
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
@@ -586,6 +597,15 @@ class SftpRelayStorage:
 
     def read_head(self, topic_uuid: str, peer_id: str) -> dict | None:
         return self._read_json(posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json"))
+
+    def read_head_with_mtime(
+        self, topic_uuid: str, peer_id: str,
+    ) -> tuple[dict | None, float | None]:
+        path = posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json")
+        content = self._read_json(path)
+        if content is None:
+            return None, None
+        return content, self._stat_mtime(path)
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
