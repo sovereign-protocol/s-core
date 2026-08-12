@@ -1562,9 +1562,25 @@ class RelayLogic:
                     if peer_id not in profile_blobs_read:
                         profile_blobs_read.add(peer_id)
                         self._cache_blobs(sorted(referenced_blob_ids(profile)))
-                head = self.storage.read_head(topic_uuid, peer_id)
+                read_head_with_mtime = getattr(
+                    self.storage, "read_head_with_mtime", None,
+                )
+                if read_head_with_mtime:
+                    head, head_mtime = read_head_with_mtime(
+                        topic_uuid, peer_id,
+                    )
+                else:
+                    head = self.storage.read_head(topic_uuid, peer_id)
+                    head_mtime = None
                 if not head:
                     continue
+                with self._presence_lock:
+                    own_presence_mtime = self._own_presence_mtime
+                source_age_seconds = (
+                    max(0.0, own_presence_mtime - head_mtime)
+                    if own_presence_mtime is not None and head_mtime is not None
+                    else None
+                )
                 raw_publication_seq = head.get("publication_seq", 0)
                 publication_seq = (
                     raw_publication_seq
@@ -1685,6 +1701,13 @@ class RelayLogic:
                     # reconciliation briefly combines a fresh acknowledgement
                     # with stale peer content and reports false divergence.
                     with self._session_lock:
+                        self.session.observe_peer_perspective(
+                            peer_addr,
+                            topic_uuid,
+                            source_age_seconds=source_age_seconds,
+                            source_timestamp=head_mtime,
+                            channel_kind="mailbox",
+                        )
                         observations_changed = (
                             self.session.record_peer_observations(
                                 peer_addr, observed_for_me,
@@ -1743,6 +1766,13 @@ class RelayLogic:
                             self.session.note_pending_topic_invitation(topic_uuid)
                     self.session.apply_peer_subtree(
                         peer_addr, peer_copy, payload.get("parent_uuid"),
+                    )
+                    self.session.observe_peer_perspective(
+                        peer_addr,
+                        topic_uuid,
+                        source_age_seconds=source_age_seconds,
+                        source_timestamp=head_mtime,
+                        channel_kind="mailbox",
                     )
                     self.session.record_peer_observations(
                         peer_addr, observed_for_me,

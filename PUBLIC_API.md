@@ -15,8 +15,9 @@ The current exports are: `ApplicationFacade`, `ApplicationFacadeLookup`,
 `ApplicationInstance`, `ApplicationManifest`, `ApplicationRegistration`,
 `ApplicationResultView`, `ApplicationServices`, `ApplicationSpec`,
 `BlobChannel`, `Channel`, `ChannelAcceptance`, `ChannelResult`,
-`IncompatibleApplicationFacade`, `Invitation`, `LivenessChannel`,
-`ManagedChannel`, `PairingChannel`, `PollCycleResult`,
+`IncompatibleApplicationFacade`, `Invitation`, `LastWriteWinsPolicy`, `LivenessChannel`,
+`ManagedChannel`, `PairingChannel`, `PerspectiveObservation`,
+`PerspectiveSource`, `ProjectedNode`, `PollCycleResult`,
 `PollingChannel`, `PollingEndpoint`, `ProtocolNode`, `ProtocolResult`,
 `ProtocolState`, `RelayStorage`, `Session`, `SessionEffect`, `SessionResult`,
 `UnsupportedProtocolVersion`, `application_json_response`,
@@ -155,3 +156,18 @@ live namespace and requires the caller to hold `Session.lock`. Core's response
 helpers (`mutation_response`, `snapshot_response`, `composite_response`) hold it
 already; an application calling from anywhere else opens its own transaction
 with `with session.lock:`. See `DESIGN_LOCKING_AND_COMPOSITE_READS.md`.
+
+`Session.project_nodes()` derives a read-only view across local and explicitly
+connected peer perspectives without adopting their records. `ProjectedNode`
+preserves the detached `ProtocolNode` and adds a verified `PerspectiveSource`;
+`PerspectiveObservation` contains runtime-only timing facts. Callers may supply
+a relative maximum age, an absolute lower timestamp, both, or neither. Core
+measures and filters these facts but does not define domain-level freshness.
+
+`LastWriteWinsPolicy` lets an application declare a narrowly scoped timestamp
+rule for one node type. The declaration names the timestamp field and the data
+and parent fields that constitute the reconciled value. Passing declarations
+to `Session.reconcile_peer_changes(..., reconciliation_policies=...)` makes
+Core reject stale candidates, resolve a newer eligible candidate, and normalize
+timestamp-only differences. Other field differences remain ordinary
+transitions; applications still decide which semantic changes may be adopted.

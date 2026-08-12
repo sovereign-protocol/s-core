@@ -228,7 +228,7 @@ class AppServerTests(unittest.TestCase):
 
         self.assertEqual(payload["format"], "sovereign-session")
         self.assertEqual(payload["version"], 2)
-        self.assertEqual(payload["protocol_schema_version"], 3)
+        self.assertEqual(payload["protocol_schema_version"], 4)
         self.assertIn(child.uuid, loaded.protocol.index)
         self.assertEqual(loaded.protocol.index[child.uuid].data["name"], "saved")
         self.assertEqual(

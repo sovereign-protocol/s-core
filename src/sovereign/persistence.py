@@ -31,7 +31,7 @@ def save_session_to_file(session: Session, path: str, logger=print) -> None:
     with lock:
         tmp_path = f"{absolute_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         with session.lock:
-            protocol_snapshot = session.export_protocol_root()
+            protocol_snapshot = session.export_persistence_protocol_root()
             try:
                 ProtocolNode.from_dict(protocol_snapshot)
             except ValueError as exc:

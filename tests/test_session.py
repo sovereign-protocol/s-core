@@ -1,10 +1,31 @@
 import unittest
 
+from sovereign import LastWriteWinsPolicy
 from sovereign.protocol import ProtocolNode
 from sovereign.session import Session
+from sovereign.signing import sign_revision
 
 
 class SessionTests(unittest.TestCase):
+    @staticmethod
+    def perspective_pair():
+        author = Session("si-author")
+        observer = Session("si-observer")
+        author.identity
+        observer.identity
+        topic = author.create_child(
+            author.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+        observer.adopt_subtree(
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        observer.note_indirect_peer_topic(author.address, topic.uuid)
+        observer.apply_peer_subtree(
+            author.address, ProtocolNode.from_dict(author.identity.to_dict()), None,
+        )
+        return author, observer, topic
+
     def test_start_discussion_tracks_topic_and_members(self):
         session = Session("si-a")
         topic = session.create_child(
@@ -819,6 +840,88 @@ class SessionTests(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found.data["display_name"], "Bob")
 
+    def test_known_identity_uses_newest_verified_avatar_across_addresses(self):
+        bob = Session("bob")
+        bob.set_identity("Bob", picture="old-avatar")
+        old_profile = ProtocolNode.from_dict(bob.identity.to_dict())
+        bob.set_identity("Bob", picture="new-avatar")
+        new_profile = ProtocolNode.from_dict(bob.identity.to_dict())
+
+        observer = Session("observer")
+        observer.identity
+        # The stale address sorts first, reproducing Agenda's former
+        # first-address-wins lookup. The newest profile is cached elsewhere.
+        observer.apply_peer_subtree("a-stale", old_profile, None)
+        observer.apply_peer_subtree("z-current", new_profile, None)
+
+        resolved = observer.find_peer_identity(
+            bob.identity.data["identity_key"],
+        )
+        known = next(
+            item for item in observer.known_identities()
+            if item["uuid"] == bob.identity.uuid
+        )
+
+        self.assertEqual(resolved.data["picture"], "new-avatar")
+        self.assertEqual(
+            observer.peer_identity("a-stale").data["picture"], "new-avatar",
+        )
+        self.assertEqual(known["picture"], "new-avatar")
+        self.assertEqual(known["addresses"], ["a-stale", "z-current"])
+
+    def test_invalid_high_sequence_profile_cannot_replace_verified_avatar(self):
+        bob = Session("bob")
+        bob.set_identity("Bob", picture="current-avatar")
+        current = ProtocolNode.from_dict(bob.identity.to_dict())
+        forged = ProtocolNode.from_dict(current.to_dict())
+        forged.data["picture"] = "forged-avatar"
+        forged.revision_seq += 1000
+        forged.updated_at = "2099-01-01T00:00:00+00:00"
+        forged.refresh_hashes()
+
+        observer = Session("observer")
+        observer.identity
+        observer.apply_peer_subtree("a-forged", forged, None)
+        observer.apply_peer_subtree("z-valid", current, None)
+
+        resolved = observer.find_peer_identity(
+            bob.identity.data["identity_key"],
+        )
+
+        self.assertEqual(resolved.data["picture"], "current-avatar")
+        self.assertEqual(
+            observer.known_identities()[1]["picture"], "current-avatar",
+        )
+
+    def test_competing_self_signed_identity_chain_cannot_replace_trusted_avatar(self):
+        bob = Session("bob")
+        bob.set_identity("Bob", picture="trusted-avatar")
+        trusted = ProtocolNode.from_dict(bob.identity.to_dict())
+
+        attacker = Session("attacker")
+        forged = ProtocolNode.from_dict(attacker.identity.to_dict())
+        forged.uuid = trusted.uuid
+        forged.data["identity_key"] = trusted.data["identity_key"]
+        forged.data["display_name"] = "Not Bob"
+        forged.data["picture"] = "forged-avatar"
+        forged.revision_origin = trusted.revision_origin
+        forged.revision_seq = trusted.revision_seq + 1000
+        forged.updated_at = "2099-01-01T00:00:00+00:00"
+        forged.refresh_hashes()
+        sign_revision(forged, attacker._signing_keypair)
+
+        observer = Session("observer")
+        observer.identity
+        observer.apply_peer_subtree("z-trusted", trusted, None)
+        observer.apply_peer_subtree("a-forged", forged, None)
+
+        resolved = observer.find_peer_identity(
+            trusted.data["identity_key"],
+        )
+
+        self.assertEqual(resolved.data["picture"], "trusted-avatar")
+        self.assertEqual(resolved.data["display_name"], "Bob")
+
     def test_set_peer_identity_key_records_and_overwrites(self):
         session = Session("si-a")
 
@@ -1139,6 +1242,176 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(local.protocol.index[child.uuid].data["text"], "original")
 
+    @staticmethod
+    def _lww_position_pair():
+        peer = Session("si-b")
+        topic = peer.create_child(
+            peer.protocol.root.uuid, {"type": "board", "name": "t"}, {},
+        ).value
+        first = peer.create_child(
+            topic.uuid, {"type": "column", "name": "first"}, {},
+        ).value
+        second = peer.create_child(
+            topic.uuid, {"type": "column", "name": "second"}, {},
+        ).value
+        third = peer.create_child(
+            topic.uuid, {"type": "column", "name": "third"}, {},
+        ).value
+        card = peer.create_child(first.uuid, {
+            "type": "card", "text": "same", "order": 0.0,
+            "position_at": "2026-01-01T00:00:00+00:00",
+        }, {}).value
+        local = Session("si-a")
+        local.adopt_subtree(
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+        return peer, local, topic, second, third, card
+
+    def test_lww_policy_adopts_newer_declared_position_conflict(self):
+        peer, local, topic, second, third, card = self._lww_position_pair()
+        local.move(card.uuid, second.uuid)
+        local_card = local.protocol.index[card.uuid]
+        local.modify(card.uuid, {
+            **local_card.data,
+            "order": 1.0,
+            "position_at": "2026-01-01T00:00:01+00:00",
+        }, local_card.weights)
+        peer.move(card.uuid, third.uuid)
+        peer_card = peer.protocol.index[card.uuid]
+        peer.modify(card.uuid, {
+            **peer_card.data,
+            "order": 2.0,
+            "position_at": "2026-01-01T00:00:02+00:00",
+        }, peer_card.weights)
+        local.apply_peer_subtree(
+            peer.address,
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
+            reconciliation_policies=(LastWriteWinsPolicy(
+                node_type="card",
+                timestamp_field="position_at",
+                data_fields=("order",),
+                include_parent=True,
+            ),),
+        )
+
+        self.assertTrue(changed)
+        adopted = local.protocol.index[card.uuid]
+        self.assertEqual(adopted.parent_uuid, third.uuid)
+        self.assertEqual(adopted.data["order"], 2.0)
+
+    def test_lww_policy_keeps_newer_local_position(self):
+        peer, local, topic, second, third, card = self._lww_position_pair()
+        local.move(card.uuid, second.uuid)
+        local_card = local.protocol.index[card.uuid]
+        local.modify(card.uuid, {
+            **local_card.data,
+            "position_at": "2026-01-01T00:00:03+00:00",
+        }, local_card.weights)
+        peer.move(card.uuid, third.uuid)
+        peer_card = peer.protocol.index[card.uuid]
+        peer.modify(card.uuid, {
+            **peer_card.data,
+            "position_at": "2026-01-01T00:00:02+00:00",
+        }, peer_card.weights)
+        local.apply_peer_subtree(
+            peer.address,
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
+            reconciliation_policies=(LastWriteWinsPolicy(
+                node_type="card",
+                timestamp_field="position_at",
+                data_fields=("order",),
+                include_parent=True,
+            ),),
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(local.protocol.index[card.uuid].parent_uuid, second.uuid)
+
+    def test_lww_policy_does_not_hide_other_semantic_conflicts(self):
+        peer, local, topic, second, third, card = self._lww_position_pair()
+        local.move(card.uuid, second.uuid)
+        local_card = local.protocol.index[card.uuid]
+        local.modify(card.uuid, {
+            **local_card.data,
+            "text": "local text",
+            "position_at": "2026-01-01T00:00:01+00:00",
+        }, local_card.weights)
+        peer.move(card.uuid, third.uuid)
+        peer_card = peer.protocol.index[card.uuid]
+        peer.modify(card.uuid, {
+            **peer_card.data,
+            "text": "peer text",
+            "position_at": "2026-01-01T00:00:02+00:00",
+        }, peer_card.weights)
+        local.apply_peer_subtree(
+            peer.address,
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
+            reconciliation_policies=(LastWriteWinsPolicy(
+                node_type="card",
+                timestamp_field="position_at",
+                data_fields=("order",),
+                include_parent=True,
+            ),),
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(local.protocol.index[card.uuid].data["text"], "local text")
+
+    def test_lww_policy_settles_timestamp_only_difference_without_adoption(self):
+        peer, local, topic, _second, _third, card = self._lww_position_pair()
+        local_card = local.protocol.index[card.uuid]
+        local.modify(card.uuid, {
+            **local_card.data,
+            "position_at": "2026-01-01T00:00:01+00:00",
+        }, local_card.weights)
+        peer_card = peer.protocol.index[card.uuid]
+        peer.modify(card.uuid, {
+            **peer_card.data,
+            "position_at": "2026-01-01T00:00:02+00:00",
+        }, peer_card.weights)
+        local.apply_peer_subtree(
+            peer.address,
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
+            node_is_eligible=lambda node, event_type: False,
+            reconciliation_policies=(LastWriteWinsPolicy(
+                node_type="card",
+                timestamp_field="position_at",
+                data_fields=("order",),
+                include_parent=True,
+            ),),
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            local.protocol.index[card.uuid].data["position_at"],
+            "2026-01-01T00:00:02+00:00",
+        )
+
     def test_reconcile_adopts_an_existing_nodes_own_fields_only(self):
         # Adopting an existing node updates its own fields only (never grafts
         # its whole subtree) - now the default in accept_peer_node, so no
@@ -1289,6 +1562,181 @@ class SessionTests(unittest.TestCase):
         refused = peer.update_agenda_item_text(item.uuid, "Hijacked")
         self.assertEqual(refused.status, "error")
         self.assertIn("originator", refused.reason)
+
+    def test_agenda_projection_reads_peer_item_without_adopting_it(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Observed").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        projected = observer.agenda_projection(topic.uuid)
+
+        self.assertEqual([entry.uuid for entry in projected], [item.uuid])
+        self.assertFalse(projected[0].perspective.local)
+        self.assertEqual(
+            projected[0].perspective.identity_uuid, author.identity.uuid,
+        )
+        self.assertNotIn(item.uuid, observer.protocol.index)
+
+    def test_projection_deduplicates_same_identity_across_addresses(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "One identity").value
+        topic_copy = ProtocolNode.from_dict(
+            author.protocol.index[topic.uuid].to_dict(),
+        )
+        observer.apply_peer_subtree(
+            author.address, ProtocolNode.from_dict(topic_copy.to_dict()),
+            observer.protocol.root.uuid,
+        )
+        second_address = "relay:author-second-device"
+        observer.note_indirect_peer_topic(second_address, topic.uuid)
+        observer.apply_peer_subtree(
+            second_address, ProtocolNode.from_dict(author.identity.to_dict()), None,
+        )
+        observer.apply_peer_subtree(
+            second_address, ProtocolNode.from_dict(topic_copy.to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        projected = observer.agenda_projection(topic.uuid)
+
+        self.assertEqual([entry.uuid for entry in projected], [item.uuid])
+        self.assertEqual(
+            set(projected[0].perspective.addresses),
+            {author.address, second_address},
+        )
+
+    def test_agenda_projection_rejects_author_field_owner_mismatch(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Mislabeled").value
+        node = author.protocol.index[item.uuid]
+        changed = author.modify(
+            node.uuid,
+            {**node.data, "author": observer.identity.uuid},
+            node.weights,
+        )
+        self.assertEqual(changed.status, "ok")
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        self.assertEqual(observer.agenda_projection(topic.uuid), [])
+
+    def test_perspective_projection_accepts_relative_and_absolute_thresholds(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Time-bound").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        observer.observe_peer_perspective(
+            author.address,
+            topic.uuid,
+            source_age_seconds=10,
+            source_timestamp=1_000,
+            channel_kind="test",
+        )
+
+        self.assertEqual(
+            observer.agenda_projection(topic.uuid, max_age_seconds=5), [],
+        )
+        self.assertEqual(
+            [entry.uuid for entry in observer.agenda_projection(
+                topic.uuid, max_age_seconds=20,
+            )],
+            [item.uuid],
+        )
+        self.assertEqual(
+            observer.agenda_projection(topic.uuid, not_before=1_001), [],
+        )
+        self.assertEqual(
+            [entry.uuid for entry in observer.agenda_projection(
+                topic.uuid, not_before=999,
+            )],
+            [item.uuid],
+        )
+
+    def test_authoritative_peer_deletion_removes_projected_agenda_item(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Temporary").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        self.assertEqual(
+            [entry.uuid for entry in observer.agenda_projection(topic.uuid)],
+            [item.uuid],
+        )
+
+        author.delete_agenda_item(item.uuid)
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        self.assertEqual(observer.agenda_projection(topic.uuid), [])
+
+    def test_persistence_projection_drops_foreign_agenda_nodes(self):
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Foreign").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        adopted = observer.accept_peer_node(author.address, item.uuid)
+        self.assertEqual(adopted.status, "ok")
+        self.assertIn(item.uuid, observer.protocol.index)
+
+        persisted = ProtocolNode.from_dict(
+            observer.export_persistence_protocol_root(),
+        )
+
+        self.assertNotIn(item.uuid, Session._flatten_by_uuid(persisted))
+
+    def test_agenda_move_never_rewrites_an_observed_item(self):
+        local = Session("si-local")
+        peer = Session("si-peer")
+        local.identity
+        peer.identity
+        topic = local.create_child(
+            local.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+        first = local.create_agenda_item(topic.uuid, "First").value
+        peer.adopt_subtree(
+            ProtocolNode.from_dict(local.protocol.index[topic.uuid].to_dict()),
+            peer.protocol.root.uuid,
+        )
+        foreign = peer.create_agenda_item(topic.uuid, "Foreign").value
+        local.note_indirect_peer_topic(peer.address, topic.uuid)
+        local.apply_peer_subtree(
+            peer.address, ProtocolNode.from_dict(peer.identity.to_dict()), None,
+        )
+        local.apply_peer_subtree(
+            peer.address,
+            ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+        before = local.get_cached_peer_subtree(peer.address, foreign.uuid).data["order"]
+
+        result = local.move_agenda_item(first.uuid, 1)
+
+        self.assertEqual(result.status, "ok", result.reason)
+        self.assertEqual(
+            local.get_cached_peer_subtree(peer.address, foreign.uuid).data["order"],
+            before,
+        )
+        self.assertEqual(
+            local.move_agenda_item(foreign.uuid, 0).status, "error",
+        )
 
 if __name__ == "__main__":
     unittest.main()
