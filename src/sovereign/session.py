@@ -18,6 +18,11 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any, Callable
 
+from .adoption import (
+    ADOPT_AUTO, ADOPT_HOLD, ADOPT_NEVER, AUTHOR_ANY, AUTHOR_SAME_ORIGIN,
+    RESOLVE_ADOPT, RESOLVE_DEFER, RESOLVE_REFUSE, RESOLVE_VALUES,
+    ROOT_DEFAULT, AdoptionEntry,
+)
 from .blob_store import avatar_attachment
 from .locking import OrderedRLock, SESSION_LOCK_ORDER
 from .protocol import (
@@ -247,6 +252,28 @@ class Session:
         # because an application is activated later.
         self.pending_topic_invitations: set[str] = set()
         self._app_metadata: dict[str, Any] = {}
+        # How incoming changes are handled, per node and per topic. Written by
+        # applications, read and executed by Core, never interpreted by it.
+        # Local: not part of any node, not hashed, not published, never adopted
+        # from a peer. See DESIGN_ADOPTION_METADATA.md.
+        self._adoption_by_node: dict[str, AdoptionEntry] = {}
+        self._adoption_by_topic: dict[str, AdoptionEntry] = {}
+        # Runtime-only: how a topic classifies a node it does not yet hold.
+        # Asked once per node, at first sight, and the answer is persisted.
+        self._adoption_classifiers: dict[
+            str, Callable[[ProtocolNode, AdoptionEntry], AdoptionEntry | None]
+        ] = {}
+        # Runtime-only: how a topic resolves a node it is holding. Asked every
+        # time, never stored, because the rules it answers from move.
+        self._adoption_resolvers: dict[
+            str, Callable[[ProtocolNode, ProtocolNode | None, str], str | None]
+        ] = {}
+        self._reconciliation_by_topic: dict[
+            str, tuple[LastWriteWinsPolicy, ...]
+        ] = {}
+        # Topics with a reconciliation pass in progress. Re-applying a changed
+        # declaration must not recurse into the pass that is applying it.
+        self._reconciling_topics: set[str] = set()
         # Runtime-only application hooks used by channels to enumerate and
         # mount shared topic roots without importing application modules.
         self.shared_topics = SharedTopicRegistry()
@@ -503,6 +530,7 @@ class Session:
                 for addr, bindings in sorted(self.peer_topic_channel.items())
             },
             "app_metadata": copy.deepcopy(self._app_metadata),
+            "adoption_metadata": self.adoption_metadata_snapshot(),
             "signing_key": copy.deepcopy(self._signing_keypair),
         }
 
@@ -542,6 +570,7 @@ class Session:
         self._app_metadata = copy.deepcopy(
             dict(metadata.get("app_metadata") or {}),
         )
+        self._restore_adoption_metadata(metadata.get("adoption_metadata"))
         self._peer_identity_key = {
             addr: key
             for addr, key in (metadata.get("peer_identity_key") or {}).items()
@@ -1756,6 +1785,623 @@ class Session:
         )
         return SessionResult("ok", value=self._snapshot_node(adopted))
 
+    # ---- adoption metadata ------------------------------------------------
+    # Applications record how incoming changes are handled; Core executes the
+    # record. Resolution cascades node -> topic -> ROOT_DEFAULT, so the table
+    # stays small: a topic default plus the exceptions, rather than an entry
+    # per node.
+
+    def _restore_adoption_metadata(self, stored: Any) -> None:
+        """Restore the table, dropping entries for nodes that are gone.
+
+        This is the table's garbage collection, and it matches how
+        active_topic_uuids is already treated: a uuid no longer in the index
+        cannot be adopted into, so its entry is dead weight. An unreadable
+        entry is dropped rather than raised on - the conservative root default
+        then applies, which is safe, where refusing to open the session is not.
+        """
+        self._adoption_by_node.clear()
+        self._adoption_by_topic.clear()
+        if not isinstance(stored, dict):
+            return
+        for key, target in (
+            ("nodes", self._adoption_by_node),
+            ("topics", self._adoption_by_topic),
+        ):
+            values = stored.get(key)
+            if not isinstance(values, dict):
+                continue
+            for node_uuid, value in values.items():
+                if (
+                    not isinstance(node_uuid, str)
+                    or self._protocol.index.get(node_uuid) is None
+                ):
+                    continue
+                entry = AdoptionEntry.from_dict(value)
+                if entry is not None:
+                    target[node_uuid] = entry
+
+    @_session_locked
+    def set_adoption_metadata(
+        self,
+        node_uuid: str,
+        *,
+        adopt: str | None = None,
+        additions: str | None = None,
+        author: str | None = None,
+    ) -> SessionResult:
+        """Record how changes to one node are handled."""
+        try:
+            entry = AdoptionEntry(adopt=adopt, additions=additions, author=author)
+        except ValueError as error:
+            return SessionResult("error", reason=str(error))
+        if not entry.to_dict():
+            self._adoption_by_node.pop(node_uuid, None)
+            return SessionResult("ok", value=None)
+        self._adoption_by_node[node_uuid] = entry
+        return SessionResult("ok", value=entry.to_dict())
+
+    @_session_locked
+    def set_topic_adoption_default(
+        self,
+        topic_uuid: str,
+        *,
+        adopt: str | None = None,
+        additions: str | None = None,
+        author: str | None = None,
+    ) -> SessionResult:
+        """Record the default for every node in one topic."""
+        try:
+            entry = AdoptionEntry(adopt=adopt, additions=additions, author=author)
+        except ValueError as error:
+            return SessionResult("error", reason=str(error))
+        previous = self._adoption_by_topic.get(topic_uuid)
+        if not entry.to_dict():
+            self._adoption_by_topic.pop(topic_uuid, None)
+        else:
+            self._adoption_by_topic[topic_uuid] = entry
+        if previous == entry:
+            # Republishing what is already declared decides nothing new.
+            return SessionResult("ok", value=entry.to_dict() or None)
+        # Classifier answers were derived under the declaration that just
+        # changed, so they are stale.
+        self._forget_unheld_adoption_answers()
+        # A declaration that only takes effect on the next peer update looks
+        # broken: turn adoption on while looking at a divergence and nothing
+        # happens, and if the peer has nothing further to send, nothing ever
+        # will. Core applies it now, for whichever application declared it.
+        self.reapply_adoption(topic_uuid)
+        return SessionResult("ok", value=entry.to_dict() or None)
+
+    @_session_locked
+    def set_topic_reconciliation_policies(
+        self, topic_uuid: str,
+        policies: tuple[LastWriteWinsPolicy, ...] = (),
+    ) -> SessionResult:
+        """Declare the structured conflict rules for one topic.
+
+        Held with the topic rather than passed per call so that Core can run a
+        pass on an application's behalf and reach the same result the
+        application would have.
+        """
+        if policies:
+            self._reconciliation_by_topic[topic_uuid] = tuple(policies)
+        else:
+            self._reconciliation_by_topic.pop(topic_uuid, None)
+        return SessionResult("ok", value=len(policies))
+
+    def _forget_unheld_adoption_answers(self) -> None:
+        """Drop what the classifier said about nodes this client does not hold.
+
+        Those answers only ever cover unheld nodes - a held node's entry is
+        written by its application - so dropping exactly those re-asks the
+        question on the next pass without touching a decision anyone made.
+        """
+        for node_uuid in list(self._adoption_by_node):
+            if self._protocol.index.get(node_uuid) is None:
+                self._adoption_by_node.pop(node_uuid, None)
+
+    @_session_locked
+    def reconsider_adoption(self, topic_uuid: str) -> bool:
+        """Re-ask every decision this topic is currently holding back.
+
+        An application's handling is not only what it declares here: a mode
+        that admits some cards and holds others is read by its own resolver at
+        the moment of decision, and Core cannot see it change. When it does,
+        every answer derived from it is stale in exactly the way a changed
+        declaration makes them stale, and is cleared the same way - so an
+        application says so once and Core does the rest.
+
+        Without this, a setting only takes effect on whatever the peer sends
+        next: widen the mode while looking at a held card and nothing happens,
+        and if the peer has nothing further to send, nothing ever will. No peer
+        is contacted - the snapshot each one last sent is enough to decide
+        against.
+        """
+        self._forget_unheld_adoption_answers()
+        return self.reapply_adoption(topic_uuid)
+
+    @_session_locked
+    def reapply_adoption(self, topic_uuid: str) -> bool:
+        """Reconcile this topic with every peer that shares it.
+
+        Core's own driver: the declaration is Core's, so acting on a change to
+        it is Core's too, and every application gets the same behaviour without
+        remembering to ask.
+        """
+        if topic_uuid in self._reconciling_topics:
+            return False
+        if self._protocol.index.get(topic_uuid) is None:
+            return False
+        changed = False
+        for peer_addr in self.peer_addresses(topic_uuid):
+            if not self.peer_discusses_node(peer_addr, topic_uuid):
+                continue
+            changed = self.reconcile_peer_changes(
+                peer_addr, topic_uuid,
+            ) or changed
+        return changed
+
+    @_session_locked
+    def clear_adoption_metadata(self, node_uuid: str) -> SessionResult:
+        self._adoption_by_node.pop(node_uuid, None)
+        return SessionResult("ok", value=None)
+
+    def adoption_metadata(self, node_uuid: str) -> AdoptionEntry:
+        """The effective handling of one node, after inheritance."""
+        entry = self._adoption_by_node.get(node_uuid, AdoptionEntry())
+        return entry.inherit(
+            self._inherited_adoption_default(node_uuid),
+        ).inherit(ROOT_DEFAULT)
+
+    def _inherited_adoption_default(self, node_uuid: str) -> AdoptionEntry:
+        """The nearest declared default at or above this node.
+
+        Walked structurally rather than resolved through the topic registry: a
+        default declared on a topic root governs its subtree, and which entry
+        applies must not depend on whether a topic was registered.
+        """
+        seen: set[str] = set()
+        current = self._protocol.index.get(node_uuid)
+        while current is not None and current.uuid not in seen:
+            seen.add(current.uuid)
+            declared = self._adoption_by_topic.get(current.uuid)
+            if declared is not None:
+                return declared
+            current = self._protocol.index.get(current.parent_uuid or "")
+        return AdoptionEntry()
+
+    def adoption_metadata_for_addition(self, parent_uuid: str) -> AdoptionEntry:
+        """How a child not yet held is handled: the parent's `additions`.
+
+        A node that does not exist locally cannot carry an entry, so its
+        parent - which the recipient does hold - answers for it. The parent's
+        `author` carries over, so "only the trustee may add here" is one
+        statement rather than one per child.
+        """
+        parent = self.adoption_metadata(parent_uuid)
+        return AdoptionEntry(
+            adopt=parent.additions,
+            additions=parent.additions,
+            author=parent.author,
+        )
+
+    @_session_locked
+    def set_adoption_metadata_for_subtree(
+        self,
+        root_uuid: str,
+        *,
+        adopt: str | None = None,
+        additions: str | None = None,
+        author: str | None = None,
+        node_type: str | None = None,
+    ) -> SessionResult:
+        """Apply one entry across a subtree, optionally by node type.
+
+        Offered by Core so applications do not each write the same walk when
+        circumstances change - an ownership change, a mode change, a new
+        trustee.
+        """
+        root = self._protocol.index.get(root_uuid)
+        if root is None:
+            return SessionResult("error", reason="node not found")
+        written = 0
+        for node in self._flatten_by_uuid(root).values():
+            if node_type is not None and node.data.get("type") != node_type:
+                continue
+            result = self.set_adoption_metadata(
+                node.uuid, adopt=adopt, additions=additions, author=author,
+            )
+            if result.status != "ok":
+                return result
+            written += 1
+        return SessionResult("ok", value=written)
+
+    @_session_locked
+    def replace_adoption_author(
+        self, root_uuid: str, previous_author: str, author: str,
+    ) -> SessionResult:
+        """Swap one authority for another throughout a subtree.
+
+        The trustee change: authority moved, so every entry naming the old
+        holder now names the new one. Entries with a different author, or none,
+        are left alone.
+        """
+        root = self._protocol.index.get(root_uuid)
+        if root is None:
+            return SessionResult("error", reason="node not found")
+        if not isinstance(author, str) or not author.strip():
+            return SessionResult("error", reason="author must be a non-empty string")
+        swapped = 0
+        for node_uuid in self._flatten_by_uuid(root):
+            entry = self._adoption_by_node.get(node_uuid)
+            if entry is None or entry.author != previous_author:
+                continue
+            self._adoption_by_node[node_uuid] = entry.with_author(author)
+            swapped += 1
+        for topic_uuid, entry in list(self._adoption_by_topic.items()):
+            if topic_uuid == root_uuid and entry.author == previous_author:
+                self._adoption_by_topic[topic_uuid] = entry.with_author(author)
+                swapped += 1
+        return SessionResult("ok", value=swapped)
+
+    @_session_locked
+    def set_adoption_classifier(
+        self,
+        topic_uuid: str,
+        classifier: Callable[[ProtocolNode, AdoptionEntry], AdoptionEntry | None]
+        | None,
+    ) -> SessionResult:
+        """Register how this topic classifies a node it does not yet hold.
+
+        A node that does not exist locally carries no entry, and its parent's
+        `additions` cannot tell one kind of incoming node from another. So Core
+        asks the application to classify it **once**, at first sight, and
+        persists the answer; every decision after that is a table read.
+
+        The distinction that matters: this classifies a node, it does not
+        decide an adoption. A hook consulted per decision would be
+        node_is_eligible under another name - application logic back on the
+        adoption path, and decisions that cannot be reproduced from stored
+        state.
+
+        It runs inside the session lock during reconciliation, so it must be
+        read-only on Session and must not perform I/O. Core never blocks on it:
+        no classifier, a classifier returning None, or one that raises, all
+        leave the inherited default in force.
+        """
+        if classifier is None:
+            self._adoption_classifiers.pop(topic_uuid, None)
+        else:
+            self._adoption_classifiers[topic_uuid] = classifier
+        return SessionResult("ok", value=None)
+
+    def _classify_unheld_node(
+        self, topic_uuid: str, node_uuid: str, peer_node: ProtocolNode,
+    ) -> None:
+        """Ask once, and remember, before the entry is read."""
+        if node_uuid in self._adoption_by_node:
+            return
+        classifier = self._adoption_classifiers.get(topic_uuid)
+        if classifier is None:
+            return
+        parent_uuid = peer_node.parent_uuid or ""
+        default = (
+            self.adoption_metadata_for_addition(parent_uuid)
+            if self._protocol.index.get(parent_uuid) is not None
+            else ROOT_DEFAULT
+        )
+        try:
+            # A detached copy: classifying must not be a way to edit the tree.
+            entry = classifier(self._snapshot_node(peer_node), default)
+        except Exception as error:  # an application fault is not Core's crash
+            self.trace_event(
+                "session.adoption_classifier_failed",
+                topic_uuid=topic_uuid,
+                node_uuid=node_uuid,
+                reason=repr(error),
+            )
+            return
+        if entry is None:
+            return
+        if not isinstance(entry, AdoptionEntry):
+            # A plain mapping is accepted so an application needs no import to
+            # answer: {"adopt": "never"} says as much as the dataclass does.
+            entry = AdoptionEntry.from_dict(entry)
+        if entry is None or not entry.to_dict():
+            return
+        self._adoption_by_node[node_uuid] = entry
+        self.trace_event(
+            "session.adoption_classified",
+            topic_uuid=topic_uuid,
+            node_uuid=node_uuid,
+            node_type=peer_node.data.get("type"),
+            entry=entry.to_dict(),
+        )
+
+    @_session_locked
+    def set_adoption_resolver(
+        self,
+        topic_uuid: str,
+        resolver: Callable[[ProtocolNode, ProtocolNode | None, str], str | None]
+        | None,
+    ) -> SessionResult:
+        """Register how this topic resolves a node it is holding.
+
+        `hold` records that nothing has decided yet. It ends in one of three
+        ways, and the application says which: `adopt` (its own rule settles
+        it), `refuse` (its rule says no, and no user decision overrides that),
+        or `defer` (nobody has decided; the user's decision governs).
+
+        Asked at the moment of decision and never stored, unlike a classifier's
+        answer, because the rules it answers from - membership, roles, what
+        somebody holds today - move. Storing the verdict would be a cache of
+        exactly the state that changes underneath it.
+
+        It runs inside the session lock, so it must be read-only on Session and
+        must not block. Reaching back into relay I/O or the channel manager
+        raises rather than deadlocks: Session is the innermost lock layer and
+        OrderedRLock rejects reverse acquisition. No resolver, a resolver
+        returning nothing, or one that raises, all mean `defer`.
+        """
+        if resolver is None:
+            self._adoption_resolvers.pop(topic_uuid, None)
+        else:
+            self._adoption_resolvers[topic_uuid] = resolver
+        return SessionResult("ok", value=None)
+
+    def _resolve_held_node(
+        self,
+        topic_uuid: str,
+        peer_node: ProtocolNode,
+        local_node: ProtocolNode | None,
+        peer_addr: str,
+    ) -> str:
+        resolver = self._adoption_resolvers.get(topic_uuid)
+        if resolver is None:
+            return RESOLVE_DEFER
+        try:
+            # Detached copies: resolving must not be a way to edit the tree.
+            verdict = resolver(
+                self._snapshot_node(peer_node),
+                self._snapshot_node(local_node) if local_node else None,
+                peer_addr,
+            )
+        except Exception as error:  # an application fault is not Core's crash
+            self.trace_event(
+                "session.adoption_resolver_failed",
+                topic_uuid=topic_uuid,
+                node_uuid=peer_node.uuid,
+                reason=repr(error),
+            )
+            return RESOLVE_DEFER
+        if verdict not in RESOLVE_VALUES:
+            return RESOLVE_DEFER
+        return verdict
+
+    def _adoption_author_permits(
+        self, entry: AdoptionEntry, peer_node: ProtocolNode,
+        reference: ProtocolNode | None,
+    ) -> bool:
+        """Whether this revision's origin may write here.
+
+        `author` is matched against `revision_origin`, which carries an
+        identity key - not a profile uuid. An application naming a concrete
+        authority resolves the holder's identity key and writes that.
+        """
+        author = entry.author or AUTHOR_ANY
+        if author == AUTHOR_ANY:
+            return True
+        origin = str(peer_node.revision_origin or "")
+        if author == AUTHOR_SAME_ORIGIN:
+            # For a change, the origin that already authored the node; for an
+            # addition, the origin that authored the parent.
+            expected = str(reference.revision_origin or "") if reference else ""
+            return bool(expected) and origin == expected
+        return origin == author
+
+    def _adoption_allows_deletion(self, node_uuid: str) -> bool:
+        """Whether adopting a deletion of this node is permitted throughout.
+
+        The protocol has no partial deletion - _delete_impl cascades to the
+        whole subtree - so a deletion may only be adopted when nothing beneath
+        it is being held. Anything held below refuses the deletion whole; the
+        container stays as a divergence, and unheld nodes beneath it still
+        delete through their own per-node events.
+        """
+        node = self._protocol.index.get(node_uuid)
+        if node is None:
+            return True
+        if self.adoption_metadata(node_uuid).adopt != ADOPT_AUTO:
+            return False
+        return all(
+            self._adoption_allows_deletion(child.uuid)
+            for child in node.children
+            if not child.deleted
+        )
+
+    def _adoption_refusal(
+        self,
+        topic_uuid: str,
+        event_type: str,
+        node_uuid: str,
+        peer_node: ProtocolNode | None,
+        local_node: ProtocolNode | None,
+        deciding: bool = False,
+        peer_addr: str = "",
+    ) -> str | None:
+        """Why the declared handling holds this change back, or None.
+
+        `deciding` marks a pass the user asked for. `hold` means "wait for me
+        to decide", so it does not block the decision itself; `never` still
+        does, because such a node is not offered at all.
+        """
+        if peer_node is None:
+            return None
+        if local_node is None:
+            # A node not yet held carries no entry of its own. The application
+            # is asked to classify it, once; failing that its parent - which
+            # this client does hold - answers for it.
+            self._classify_unheld_node(topic_uuid, node_uuid, peer_node)
+            classified = self._adoption_by_node.get(node_uuid)
+            parent = self._protocol.index.get(peer_node.parent_uuid or "")
+            if parent is None:
+                return "parent not held locally"
+            entry = self.adoption_metadata_for_addition(parent.uuid)
+            if classified is not None:
+                entry = classified.inherit(entry)
+            reference = parent
+        else:
+            entry = self.adoption_metadata(node_uuid)
+            reference = local_node
+        if entry.adopt == ADOPT_NEVER:
+            return "declared never adoptable"
+        if entry.adopt != ADOPT_AUTO:
+            # Held: nothing has decided yet. Ask the application, inside this
+            # same atomic step, so its answer and the adoption it permits
+            # cannot come apart.
+            verdict = self._resolve_held_node(
+                topic_uuid, peer_node, local_node, peer_addr,
+            )
+            if verdict == RESOLVE_REFUSE:
+                return "refused by the application's rule"
+            if verdict != RESOLVE_ADOPT and not deciding:
+                return "held for a decision"
+        if not self._adoption_author_permits(entry, peer_node, reference):
+            return "revision origin is not the declared author"
+        if (
+            local_node is not None
+            and peer_node.deleted
+            and not local_node.deleted
+            and not self._adoption_allows_deletion(node_uuid)
+        ):
+            return "deletion would remove a node being held"
+        return None
+
+    def adoption_metadata_snapshot(self) -> dict[str, Any]:
+        """The whole table, for inspection and maintenance."""
+        return {
+            "nodes": {
+                node_uuid: entry.to_dict()
+                for node_uuid, entry in sorted(self._adoption_by_node.items())
+            },
+            "topics": {
+                topic_uuid: entry.to_dict()
+                for topic_uuid, entry in sorted(self._adoption_by_topic.items())
+            },
+        }
+
+    # Topic confinement. An adoption authorised for one topic may create,
+    # modify or delete local nodes inside that topic and nothing else.
+    #
+    # It is needed because Core classifies transitions against a topic-scoped
+    # comparison (analyze_peer_transitions flattens one topic on each side) and
+    # then resolves them against the global index. Without this, a peer placing
+    # a node in their copy of a shared topic - reusing the uuid of a node the
+    # recipient holds elsewhere, or naming a parent_uuid in another topic -
+    # reaches nodes that were never shared with them. See
+    # DESIGN_TOPIC_CONFINEMENT.md.
+    #
+    # The check is on the destination: the local node being changed and the
+    # local parent a new node attaches to. Never on the incoming node's type or
+    # on the peer's account of where it lives, both of which the peer chooses.
+
+    def _authorised_topic(self, peer_addr: str, node_uuid: str) -> str | None:
+        """The topic an adoption of this node is authorised for.
+
+        Read structurally from the peer's cached perspective - the topic
+        subtree their copy of this node actually arrived in - rather than from
+        a registry, so it is defined for every peer whose data we hold. It is
+        safe to take from the peer only because _confined_to_topic then checks
+        it against where the destination sits *locally*: a peer claiming their
+        node belongs to a shared topic while the local destination lies in
+        another one fails that comparison, and that mismatch is exactly what a
+        peer-side check alone cannot catch.
+        """
+        topics = self._peer_topic_roots(peer_addr)
+        for topic in topics:
+            if self._find_in_tree(topic, node_uuid):
+                return topic.uuid
+        # Adopting an absence is the case the peer's own copy cannot answer:
+        # the node is local and the peer's not having it is the whole point. So
+        # fall back to the shared topic that contains it locally - still one
+        # the peer demonstrably holds, never an unshared one.
+        for topic in topics:
+            if self._is_descendant_or_self(topic.uuid, node_uuid):
+                return topic.uuid
+        return None
+
+    def _peer_topic_roots(self, peer_addr: str) -> list[ProtocolNode]:
+        cache = self._peer_perspectives.get(peer_addr)
+        if cache is None:
+            return []
+        if cache.data.get("type") == "peer_cache_root":
+            return list(cache.children)
+        return [cache]
+
+    def _confined_to_topic(self, topic_uuid: str | None,
+                           node_uuid: str) -> bool:
+        # Structural containment in the local tree, not a registry lookup: the
+        # question is where the write would land, and the answer must not
+        # depend on whether a topic was registered.
+        return bool(topic_uuid) and self._is_descendant_or_self(
+            topic_uuid, node_uuid,
+        )
+
+    def _confinement_refusal(
+        self,
+        peer_addr: str,
+        topic_uuid: str | None,
+        node_uuid: str,
+        peer: ProtocolNode | None,
+        local: ProtocolNode | None,
+    ) -> str | None:
+        """Why this adoption would leave `topic_uuid`, or None if it stays."""
+        if not topic_uuid:
+            return "no single shared topic authorises this node"
+        if local is not None:
+            if not self._confined_to_topic(topic_uuid, node_uuid):
+                return "node belongs to another topic"
+            # A topic root is attached under each session's own local
+            # container, so its parent is deliberately not inside the topic and
+            # its move is never adopted (see accept_peer_node).
+            if node_uuid == topic_uuid:
+                return None
+            destination = peer.parent_uuid if peer is not None else None
+            if (
+                destination
+                and destination != local.parent_uuid
+                and not self._confined_to_topic(topic_uuid, destination)
+            ):
+                return "move leaves the topic"
+            return None
+        destination = peer.parent_uuid if peer is not None else None
+        if destination and not self._confined_to_topic(topic_uuid, destination):
+            return "destination parent belongs to another topic"
+        return None
+
+    def _refuse_unconfined(
+        self,
+        peer_addr: str,
+        topic_uuid: str | None,
+        node_uuid: str,
+        peer: ProtocolNode | None,
+        local: ProtocolNode | None,
+    ) -> str | None:
+        reason = self._confinement_refusal(
+            peer_addr, topic_uuid, node_uuid, peer, local,
+        )
+        if reason is not None:
+            self.trace_event(
+                "session.confinement_refused",
+                peer_addr=peer_addr,
+                topic_uuid=topic_uuid,
+                node_uuid=node_uuid,
+                local_topic_uuid=self._topic_for_node(node_uuid),
+                reason=reason,
+            )
+        return reason
+
     @_session_locked
     def accept_peer_node(
         self,
@@ -1763,13 +2409,34 @@ class Session:
         node_uuid: str,
         adopt_absence: bool = False,
         adopt_descendants: bool = True,
+        topic_uuid: str | None = None,
     ) -> SessionResult:
+        authorised = topic_uuid or self._authorised_topic(peer_addr, node_uuid)
         if adopt_absence:
+            refusal = self._refuse_unconfined(
+                peer_addr, authorised, node_uuid, None,
+                self._protocol.index.get(node_uuid),
+            )
+            if refusal:
+                return SessionResult("error", reason=refusal)
             return self.delete(node_uuid)
         peer = self.get_cached_peer_subtree(peer_addr, node_uuid)
         if not peer:
             return SessionResult("error", reason="peer node not found")
         local = self._protocol.index.get(node_uuid)
+        refusal = self._refuse_unconfined(
+            peer_addr, authorised, node_uuid, peer, local,
+        )
+        if refusal:
+            return SessionResult("error", reason=refusal)
+        # `hold` is deliberately not enforced here: holding a change means
+        # waiting for the user to decide, and this is that decision. `never`
+        # is, because a node nobody may adopt is not offered at all.
+        if (
+            local is not None
+            and self.adoption_metadata(node_uuid).adopt == ADOPT_NEVER
+        ):
+            return SessionResult("error", reason="declared never adoptable")
         if local is not None:
             # The node already exists locally: adopt its OWN fields only (a
             # field-level, base-preserving update). Descendants are separate
@@ -1836,6 +2503,15 @@ class Session:
         if target.status != "ok":
             return target
         if rollback_absence:
+            refusal = self._refuse_unconfined(
+                peer_addr,
+                self._authorised_topic(peer_addr, node_uuid),
+                node_uuid,
+                None,
+                self._protocol.index.get(node_uuid),
+            )
+            if refusal:
+                return SessionResult("error", reason=refusal)
             return self.delete(node_uuid)
         return self.accept_peer_node(peer_addr, node_uuid)
 
@@ -1912,7 +2588,7 @@ class Session:
         peer_addr: str,
         topic_uuid: str,
         node_is_eligible: Callable[[ProtocolNode, str], bool] | None = None,
-        reconciliation_policies: tuple[LastWriteWinsPolicy, ...] = (),
+        deciding: bool = False,
     ) -> bool:
         # Generic "adopt incoming changes" walk - every app on this protocol
         # wants the same thing (adopt whatever a peer changed for one topic).
@@ -1955,67 +2631,113 @@ class Session:
             local_state_hash=local_topic.state_hash,
         )
 
+        reconciliation_policies = self._reconciliation_by_topic.get(
+            topic_uuid, (),
+        )
         # Reconciliation is always per node. There is deliberately no
         # wholesale-subtree replace: with node_hash classification the topic
         # root's own event reflects only its own fields, so it can't safely
         # decide to overwrite an unrelated local descendant change.
+        # Parents before children. An addition is adopted shallowly, so each
+        # level is judged by its own parent's entry - which only works if the
+        # parent exists by the time its children are considered.
+        # analyze_peer_transitions returns events uuid-sorted, so impose the
+        # order here rather than relying on a wholesale graft to carry
+        # descendants in.
+        depth = {
+            node.uuid: index
+            for index, node in enumerate(self._breadth_first(peer_topic))
+        }
+        peer_events = sorted(
+            peer_events,
+            key=lambda event: depth.get(event["node_uuid"], len(depth)),
+        )
         changed = False
-        for event in peer_events:
-            peer_node = self.get_cached_peer_subtree(peer_addr, event["node_uuid"])
-            local_node = self._protocol.index.get(event["node_uuid"])
-            reference_node = local_node or peer_node
-            if not reference_node:
-                continue
-            lww = self._last_write_wins_resolution(
-                local_node, peer_node, reconciliation_policies,
-            )
-            if lww is not None:
-                policy, timestamp_only, peer_order = lww
+        self._reconciling_topics.add(topic_uuid)
+        try:
+            for event in peer_events:
+                peer_node = self.get_cached_peer_subtree(peer_addr, event["node_uuid"])
+                local_node = self._protocol.index.get(event["node_uuid"])
+                reference_node = local_node or peer_node
+                if not reference_node:
+                    continue
+                settling_only = False
+                lww = self._last_write_wins_resolution(
+                    local_node, peer_node, reconciliation_policies,
+                )
+                if lww is not None:
+                    policy, timestamp_only, peer_order = lww
+                    self.trace_event(
+                        "session.reconcile_policy",
+                        peer_addr=peer_addr,
+                        topic_uuid=topic_uuid,
+                        node_uuid=event["node_uuid"],
+                        event_type=event["type"],
+                        policy=policy.to_dict(),
+                        timestamp_only=timestamp_only,
+                        winner=(
+                            "peer" if peer_order == 1
+                            else "local" if peer_order == -1
+                            else "tie" if peer_order == 0
+                            else "unresolved"
+                        ),
+                    )
+                    # Timestamp-only differences carry no application meaning.
+                    # Settling them is normalization, not adoption policy. A real
+                    # semantic difference still passes through the application's
+                    # explicit eligibility decision - and through declared
+                    # handling, which settling likewise bypasses: converging two
+                    # copies of the same value decides nothing to hold back.
+                    settling_only = timestamp_only
+                    if peer_order != 1 or (
+                        not timestamp_only
+                        and not node_is_eligible(reference_node, event["type"])
+                    ):
+                        continue
+                else:
+                    if event["type"] not in (
+                        "peer_made_changes", "local_missing_node",
+                    ):
+                        continue
+                    if not node_is_eligible(reference_node, event["type"]):
+                        continue
+                if not settling_only:
+                    refusal = self._adoption_refusal(
+                        topic_uuid, event["type"], event["node_uuid"],
+                        peer_node, local_node, deciding=deciding,
+                        peer_addr=peer_addr,
+                    )
+                    if refusal:
+                        self.trace_event(
+                            "session.adoption_held",
+                            peer_addr=peer_addr,
+                            topic_uuid=topic_uuid,
+                            node_uuid=event["node_uuid"],
+                            event_type=event["type"],
+                            reason=refusal,
+                        )
+                        continue
                 self.trace_event(
-                    "session.reconcile_policy",
+                    "session.reconcile_node",
                     peer_addr=peer_addr,
                     topic_uuid=topic_uuid,
                     node_uuid=event["node_uuid"],
                     event_type=event["type"],
-                    policy=policy.to_dict(),
-                    timestamp_only=timestamp_only,
-                    winner=(
-                        "peer" if peer_order == 1
-                        else "local" if peer_order == -1
-                        else "tie" if peer_order == 0
-                        else "unresolved"
-                    ),
+                    peer_state_hash=event.get("peer_state_hash"),
                 )
-                # Timestamp-only differences carry no application meaning.
-                # Settling them is normalization, not adoption policy. A real
-                # semantic difference still passes through the application's
-                # explicit eligibility decision.
-                if peer_order != 1 or (
-                    not timestamp_only
-                    and not node_is_eligible(reference_node, event["type"])
-                ):
-                    continue
-            else:
-                if event["type"] not in (
-                    "peer_made_changes", "local_missing_node",
-                ):
-                    continue
-                if not node_is_eligible(reference_node, event["type"]):
-                    continue
-            self.trace_event(
-                "session.reconcile_node",
-                peer_addr=peer_addr,
-                topic_uuid=topic_uuid,
-                node_uuid=event["node_uuid"],
-                event_type=event["type"],
-                peer_state_hash=event.get("peer_state_hash"),
-            )
-            # accept_peer_node adopts an existing node's own fields (shallow,
-            # so a container change never drags in a filtered-out descendant)
-            # and grafts a brand-new node's whole subtree - the event type
-            # already tells the two apart, so no adopt-mode hint is needed.
-            result = self.accept_peer_node(peer_addr, event["node_uuid"])
-            changed = changed or result.status == "ok"
+                # accept_peer_node adopts an existing node's own fields (shallow,
+                # so a container change never drags in a filtered-out descendant)
+                # and grafts a brand-new node's whole subtree - the event type
+                # already tells the two apart. An addition is always shallow:
+                # each descendant is a separate decision under its own parent's
+                # entry, so grafting the subtree would decide them all at once.
+                result = self.accept_peer_node(
+                    peer_addr, event["node_uuid"], topic_uuid=topic_uuid,
+                    adopt_descendants=False,
+                )
+                changed = changed or result.status == "ok"
+        finally:
+            self._reconciling_topics.discard(topic_uuid)
         self.trace_event("session.reconcile_done", peer_addr=peer_addr,
                           topic_uuid=topic_uuid, changed=changed)
         return changed
@@ -2055,6 +2777,7 @@ class Session:
                 peer_addr,
                 node.uuid,
                 adopt_descendants=node.uuid not in self._protocol.index,
+                topic_uuid=topic_uuid,
             )
             changed = changed or result.status == "ok"
 

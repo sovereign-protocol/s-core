@@ -321,6 +321,9 @@ class SessionTests(unittest.TestCase):
             ProtocolNode.from_dict(local.protocol.index[topic.uuid].to_dict()),
             local.protocol.root.uuid,
         )
+        peer.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         self.assertTrue(peer.reconcile_peer_changes("si-a", topic.uuid))
         peer.modify(child.uuid, {"name": "Doing"}, {})
 
@@ -339,6 +342,9 @@ class SessionTests(unittest.TestCase):
         )
 
         self.assertEqual(child_event["type"], "peer_made_changes")
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         self.assertTrue(local.reconcile_peer_changes("si-b", topic.uuid))
         self.assertEqual(
             local.protocol.index[child.uuid].data["name"], "Doing",
@@ -1211,6 +1217,9 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         changed = local.reconcile_peer_changes("si-b", topic.uuid)
 
         self.assertTrue(changed)
@@ -1235,6 +1244,9 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         changed = local.reconcile_peer_changes(
             "si-b", topic.uuid, node_is_eligible=lambda node, event_type: False,
         )
@@ -1290,15 +1302,20 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
-        changed = local.reconcile_peer_changes(
-            peer.address,
-            topic.uuid,
-            reconciliation_policies=(LastWriteWinsPolicy(
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
+        local.set_topic_reconciliation_policies(
+            topic.uuid, (LastWriteWinsPolicy(
                 node_type="card",
                 timestamp_field="position_at",
                 data_fields=("order",),
                 include_parent=True,
             ),),
+        )
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
         )
 
         self.assertTrue(changed)
@@ -1326,15 +1343,20 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
-        changed = local.reconcile_peer_changes(
-            peer.address,
-            topic.uuid,
-            reconciliation_policies=(LastWriteWinsPolicy(
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
+        local.set_topic_reconciliation_policies(
+            topic.uuid, (LastWriteWinsPolicy(
                 node_type="card",
                 timestamp_field="position_at",
                 data_fields=("order",),
                 include_parent=True,
             ),),
+        )
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
         )
 
         self.assertFalse(changed)
@@ -1362,15 +1384,20 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
-        changed = local.reconcile_peer_changes(
-            peer.address,
-            topic.uuid,
-            reconciliation_policies=(LastWriteWinsPolicy(
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
+        local.set_topic_reconciliation_policies(
+            topic.uuid, (LastWriteWinsPolicy(
                 node_type="card",
                 timestamp_field="position_at",
                 data_fields=("order",),
                 include_parent=True,
             ),),
+        )
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
         )
 
         self.assertFalse(changed)
@@ -1394,16 +1421,21 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
-        changed = local.reconcile_peer_changes(
-            peer.address,
-            topic.uuid,
-            node_is_eligible=lambda node, event_type: False,
-            reconciliation_policies=(LastWriteWinsPolicy(
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
+        local.set_topic_reconciliation_policies(
+            topic.uuid, (LastWriteWinsPolicy(
                 node_type="card",
                 timestamp_field="position_at",
                 data_fields=("order",),
                 include_parent=True,
             ),),
+        )
+        changed = local.reconcile_peer_changes(
+            peer.address,
+            topic.uuid,
+            node_is_eligible=lambda node, event_type: False,
         )
 
         self.assertTrue(changed)
@@ -1436,6 +1468,9 @@ class SessionTests(unittest.TestCase):
             local.protocol.root.uuid,
         )
 
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         changed = local.reconcile_peer_changes("si-b", topic.uuid)
 
         self.assertTrue(changed)
@@ -1462,6 +1497,9 @@ class SessionTests(unittest.TestCase):
             "si-b",
             ProtocolNode.from_dict(peer.protocol.index[topic.uuid].to_dict()),
             local.protocol.root.uuid,
+        )
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
         )
         local.reconcile_peer_changes("si-b", topic.uuid)
 
@@ -1499,6 +1537,9 @@ class SessionTests(unittest.TestCase):
         # cascaded from gaining the leaf), and adoption of any existing node is
         # shallow by default - so neither can drag the filtered leaf in. The
         # leaf itself is local_missing_node and blocked by node_is_eligible.
+        local.set_topic_adoption_default(
+            topic.uuid, adopt="auto", additions="auto",
+        )
         local.reconcile_peer_changes(
             "si-b", topic.uuid,
             node_is_eligible=lambda node, event_type: node.data.get("type") != "leaf",
