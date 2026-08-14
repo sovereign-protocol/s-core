@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+- Added `Session.reconsider_adoption(topic_uuid)`: an application says its own
+  settings changed and Core re-decides everything the topic is holding back —
+  dropping the classifier answers derived from those settings and re-asking the
+  resolver for the nodes it holds. A declaration alone cannot be the trigger,
+  because two application modes may declare identical handling and differ only
+  in what their resolver answers. Without it a widened setting took effect only
+  on whatever the peer sent next, and if they sent nothing, never. No peer is
+  contacted: the snapshot each one last sent is enough to decide against.
+- Declared adoption handling is now mandatory and complete: an undeclared topic
+  holds everything, and no application supplies an eligibility callback any
+  more. Two hooks replace them, each for a different question. A **classifier**
+  is asked once, the first time Core meets a node it does not hold, for facts
+  that do not move — its answer is stored. A **resolver** is asked every time
+  Core meets a node it is holding, for verdicts derived from state that does —
+  its answer is never stored, because a recorded verdict would go on being true
+  after it stopped being true. The resolver answers `adopt`, `refuse` or
+  `defer`; `refuse` outranks a user decision while `defer` yields to it, a
+  distinction the old boolean callback could not express. Both run inside the
+  session lock in the same pass that applies the result, so a decision and the
+  adoption it permits cannot come apart, and an application fault leaves the
+  conservative answer in force rather than propagating.
+- `reconcile_peer_changes(..., deciding=True)` marks a pass the user asked for:
+  it passes through `hold`, which means "wait for me to decide", but not
+  `never`. `accept_peer_node` applies the same rule. One topic can therefore
+  serve an automatic pass and a manual one without two sets of rules.
+- Added per-node adoption metadata: applications record how incoming changes to
+  a node are handled — `adopt`, `additions` and `author` — and Core executes the
+  record without interpreting what the node means. Resolution cascades from the
+  node to the nearest declared default above it, so a topic default plus its
+  exceptions replaces an entry per node. Entries are local: not part of any
+  node, not hashed, not published, never adopted from a peer, so a sender
+  cannot set a recipient's handling. Persisted in the session envelope and
+  inspectable through `Session.adoption_metadata_snapshot()`; entries for nodes
+  no longer in the index are dropped on restore. Core enforces the record in
+  `reconcile_peer_changes` for topics whose application has declared a default:
+  an addition is adopted shallowly with parents processed first, so each level
+  is a separate decision, and a deletion is refused whole while anything held
+  sits beneath it. Bulk primitives cover the writes an application repeats —
+  a subtree write optionally by node type, and swapping one `author` for
+  another. Settling a timestamp-only difference bypasses the record, as it
+  already bypasses application eligibility: converging two copies of the same
+  value decides nothing. See `DESIGN_ADOPTION_METADATA.md`.
+
+- **Fixed: an adoption could reach outside the topic it was authorised for.**
+  Core classified transitions against a topic-scoped comparison and then
+  resolved them against the global node index, so a peer placing a node in
+  their copy of a shared topic could reuse the uuid of a node held in another
+  topic — overwriting and relocating it — or name a `parent_uuid` in another
+  topic and have a node created there. Neither required the target topic to be
+  shared with that peer. Application eligibility callbacks did not prevent it;
+  S-Initiative was exposed under `always`, its default. `accept_peer_node`,
+  `rollback_peer_node` and `reconcile_peer_changes` now confine every adoption
+  to the topic that authorises it, checking the destination — the local node
+  changed and the local parent a new node attaches to — rather than the
+  incoming node's type or the peer's account of where it lives. Refusals are
+  traced as `session.confinement_refused`. See `DESIGN_TOPIC_CONFINEMENT.md`.
+
 - Fixed identity/profile resolution across multiple addresses choosing the
   first cached copy. Agenda and other author avatars now use the highest
   verified revision; invalid higher-sequence copies cannot replace it.

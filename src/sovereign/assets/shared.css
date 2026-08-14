@@ -314,7 +314,11 @@ button.danger {
   display: block;
   width: 100%;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  /* break-word, not anywhere: `anywhere` also drops the element's min-content
+     width to a single character, so any track sized from its content collapses
+     and a short word wraps one letter per line. Both break a word too long to
+     fit; only this one leaves intrinsic sizing intact. */
+  overflow-wrap: break-word;
 }
 .ui-editable-text[data-editable="true"] { cursor: text; }
 .ui-editable-text[data-editable="true"]:hover,
@@ -1306,7 +1310,11 @@ dialog menu .danger:not(:last-child) {
 }
 .shell-agenda-item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  /* The topic text keeps a floor and the actions yield: the compact priority
+     select is width:max-content and the delete button still occupies its box
+     while hidden, so an `auto` actions track would take the whole row in a
+     narrow pane and leave the text a few pixels. */
+  grid-template-columns: minmax(6rem, 1fr) minmax(0, auto);
   gap: 6px;
   align-items: center;
   padding: 7px 9px;
@@ -1316,9 +1324,16 @@ dialog menu .danger:not(:last-child) {
   position: relative;
 }
 .shell-agenda-item.has-drag {
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(6rem, 1fr) minmax(0, auto);
   padding-left: 5px;
 }
+/* Place them, never let them fall where they may: the reorder handle is
+   hidden while a list has fewer than two items, and a hidden child is not a
+   grid item at all - so auto-placement would slide the text into the handle's
+   22px column and wrap it one letter per line. */
+.shell-agenda-item.has-drag > .ui-reorder-handle { grid-column: 1; }
+.shell-agenda-item.has-drag > .shell-agenda-text { grid-column: 2; }
+.shell-agenda-item.has-drag > .shell-agenda-actions { grid-column: 3; }
 .shell-pane .shell-agenda-item .ui-reorder-handle {
   min-width: 22px;
   width: 22px;
@@ -1330,7 +1345,7 @@ dialog menu .danger:not(:last-child) {
 .shell-agenda-item[data-priority="high"] { border-left-color: #f87171; }
 .shell-agenda-item[data-priority="medium"] { border-left-color: #fbbf24; }
 .shell-agenda-item[data-priority="low"] { border-left-color: #60a5fa; }
-.shell-agenda-text { min-width: 0; overflow-wrap: anywhere; }
+.shell-agenda-text { min-width: 0; overflow-wrap: break-word; }
 .shell-agenda-text.ui-editable-text { margin: -4px 0; }
 .shell-agenda-item.has-drag .shell-agenda-text.ui-editable-text { padding-left: 3px; }
 .shell-agenda-actions {
@@ -1426,7 +1441,7 @@ dialog menu .danger:not(:last-child) {
   gap: 8px;
   align-items: center;
 }
-.shell-peer-name { min-width: 0; overflow-wrap: anywhere; }
+.shell-peer-name { min-width: 0; overflow-wrap: break-word; }
 .shell-peer-status { text-align: right; white-space: nowrap; }
 .shell-target-identity {
   display: flex;
