@@ -1,7 +1,8 @@
 # Runtime dependency inventory
 
-Audit snapshot: 2026-07-26 on Windows/Python 3.14. Direct version ranges are
-declared in `pyproject.toml`; resolved versions below are the R8 rehearsal set.
+Audit snapshot: 2026-08-15 on Windows/Python 3.14. Direct version ranges are
+declared in `pyproject.toml`; resolved versions below are what those ranges
+resolve to on that platform.
 All are runtime dependencies. None is bundled in the source distribution or
 wheel. Frozen-executable bundling remains deferred behind the focused LGPL
 review.
@@ -9,11 +10,11 @@ review.
 | Package | Resolved | Direct | License | Source |
 |---|---:|:---:|---|---|
 | paramiko | 5.0.0 | yes | LGPL-2.1 | https://github.com/paramiko/paramiko |
-| starlette | 1.3.1 | yes | BSD-3-Clause | https://github.com/Kludex/starlette |
-| uvicorn | 0.52.0 | yes | BSD-3-Clause | https://github.com/encode/uvicorn |
+| starlette | 1.6.0 | yes | BSD-3-Clause | https://github.com/Kludex/starlette |
+| uvicorn | 0.52.3 | yes | BSD-3-Clause | https://github.com/encode/uvicorn |
 | anyio | 4.14.2 | no | MIT | https://github.com/agronholm/anyio |
 | bcrypt | 5.0.0 | no | Apache-2.0 | https://github.com/pyca/bcrypt |
-| cffi | 2.1.0 | no | MIT-0 | https://github.com/python-cffi/cffi |
+| cffi | 2.1.1 | no | MIT-0 | https://github.com/python-cffi/cffi |
 | click | 8.4.2 | no | BSD-3-Clause | https://github.com/pallets/click |
 | colorama | 0.4.6 | no | BSD-3-Clause | https://github.com/tartley/colorama |
 | cryptography | 50.0.0 | yes | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
