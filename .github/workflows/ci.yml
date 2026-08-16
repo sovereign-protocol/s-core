@@ -17,7 +17,20 @@ jobs:
         with: {python-version: "${{ matrix.python }}"}
       # The example is installed, not just present, so Core's suite exercises
       # its contract against a real distribution rather than only stubs.
-      - run: python -m pip install ".[test]" -e ./examples/notes
+      #
+      # The audited platform installs the reviewed closure as constraints, so a
+      # release upstream cannot change what it resolves and turn CI red with
+      # nobody having changed anything; the inventory check then fails only
+      # when the closure changes shape and a licence needs reviewing. The other
+      # jobs stay unconstrained deliberately - 3.10 proves the declared ranges
+      # still resolve on the oldest supported Python, and the experimental job
+      # is where a breaking upstream release shows up first.
+      - if: runner.os == 'Windows' && matrix.python == '3.14'
+        run: |
+          python tools/write_constraints.py constraints.txt
+          python -m pip install -c constraints.txt ".[test]" -e ./examples/notes
+      - if: ${{ !(runner.os == 'Windows' && matrix.python == '3.14') }}
+        run: python -m pip install ".[test]" -e ./examples/notes
       - run: python -m pip check
       - if: runner.os == 'Windows' && matrix.python == '3.14'
         run: python tools/check_dependency_inventory.py

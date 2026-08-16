@@ -6,6 +6,8 @@ build/
 dist/
 data/
 traces/
+# Rendered from dependency-inventory.json; never edited by hand.
+constraints.txt
 *.log
 .claude/
 core.code-workspace
