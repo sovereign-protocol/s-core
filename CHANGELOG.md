@@ -2,6 +2,29 @@
 
 ## 0.1.9
 
+- Added `Session.ensure_container(parent_uuid, name, node_type)`: a named
+  child an application uses to name a *place* rather than a type. It hands
+  Core the container's uuid, so ordering, adoption declarations and hash
+  scopes address somewhere in the tree instead of a string inside `data`.
+  A new container takes a uuid derived from its parent's, which is what lets
+  two clients arrive at the same one without either adopting it from the
+  other: the data is identical and neither timestamps nor uuids enter the
+  content hash, so the copies reconcile as agreement rather than as a change.
+  A peer's child then finds its parent already present, which a container
+  invented independently on each side would not.
+- `Protocol.create_child` accepts a caller-supplied `node_uuid`. Neither hash
+  covers the uuid, so it is assigned before the node is indexed and the
+  signature is applied afterwards as usual. A uuid already in use is refused.
+- Agenda items now hang off a container of their own rather than the topic
+  root, and `project_nodes(topic_uuid, parent_uuid)` takes the container in
+  place of a node type. The container carries the same derived uuid in every
+  perspective, so a projection addresses a peer's agenda by *where it is*
+  instead of matching a type string against everything in their tree. Core
+  declares the container never-adoptable itself, which retires the rule every
+  application previously had to remember to declare for `agenda_item`.
+- `_ordered_children` and `next_child_order` take `node_type` as optional.
+  A container holds one kind, so its uuid says what the type used to.
+
 - Added `Session.reconsider_adoption(topic_uuid)`: an application says its own
   settings changed and Core re-decides everything the topic is holding back —
   dropping the classifier answers derived from those settings and re-asking the

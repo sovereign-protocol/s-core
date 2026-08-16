@@ -1726,15 +1726,19 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(observer.agenda_projection(topic.uuid), [])
 
     def test_persistence_projection_drops_foreign_agenda_nodes(self):
-        author, observer, topic = self.perspective_pair()
+        """Grafting a topic brings the inviter's agenda; persisting drops it."""
+        author = Session("si-author")
+        observer = Session("si-observer")
+        author.identity
+        observer.identity
+        topic = author.create_child(
+            author.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
         item = author.create_agenda_item(topic.uuid, "Foreign").value
-        observer.apply_peer_subtree(
-            author.address,
+        observer.adopt_subtree(
             ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
             observer.protocol.root.uuid,
         )
-        adopted = observer.accept_peer_node(author.address, item.uuid)
-        self.assertEqual(adopted.status, "ok")
         self.assertIn(item.uuid, observer.protocol.index)
 
         persisted = ProtocolNode.from_dict(
@@ -1742,6 +1746,26 @@ class SessionTests(unittest.TestCase):
         )
 
         self.assertNotIn(item.uuid, Session._flatten_by_uuid(persisted))
+        # The container survives: it is the place, not the foreign content.
+        self.assertIn(
+            Session.agenda_container_uuid(topic.uuid),
+            Session._flatten_by_uuid(persisted),
+        )
+
+    def test_a_peer_agenda_item_is_never_adoptable(self):
+        """Core declares the rule on its own container, not every application."""
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Foreign").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        adopted = observer.accept_peer_node(author.address, item.uuid)
+
+        self.assertEqual(adopted.status, "error")
+        self.assertNotIn(item.uuid, observer.protocol.index)
 
     def test_agenda_move_never_rewrites_an_observed_item(self):
         local = Session("si-local")
@@ -1778,6 +1802,87 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(
             local.move_agenda_item(foreign.uuid, 0).status, "error",
         )
+
+    def test_agenda_containers_agree_without_being_adopted(self):
+        """Both sides derive the same container, so neither adopts the other's.
+
+        This is what lets a projection address a peer's agenda by uuid. The
+        two copies are authored independently and carry different timestamps
+        and signatures, but neither enters the content hash, so reconciliation
+        sees agreement rather than a change to decide about.
+        """
+        author, observer, topic = self.perspective_pair()
+        mine = observer.create_agenda_item(topic.uuid, "Mine").value
+        theirs = author.create_agenda_item(topic.uuid, "Theirs").value
+        container_uuid = Session.agenda_container_uuid(topic.uuid)
+
+        local_container = observer.protocol.index[container_uuid]
+        peer_container = author.protocol.index[container_uuid]
+        self.assertEqual(
+            local_container.content_hash, peer_container.content_hash,
+        )
+        self.assertNotEqual(
+            local_container.revision_signature,
+            peer_container.revision_signature,
+        )
+        self.assertEqual(
+            Session._classify_content(local_container, peer_container),
+            "in_agreement",
+        )
+
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        projected = observer.agenda_projection(topic.uuid, max_age_seconds=None)
+
+        self.assertEqual(
+            {item.uuid for item in projected}, {mine.uuid, theirs.uuid},
+        )
+
+    def test_ensure_container_is_idempotent_by_name(self):
+        session = Session("si-container")
+        session.identity
+        topic = session.create_child(
+            session.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+
+        first = session.ensure_container(topic.uuid, "comments")
+        second = session.ensure_container(topic.uuid, "comments")
+        other = session.ensure_container(topic.uuid, "attachments")
+
+        self.assertEqual(first.status, "ok", first.reason)
+        self.assertEqual(first.value.uuid, second.value.uuid)
+        self.assertNotEqual(first.value.uuid, other.value.uuid)
+        self.assertEqual(
+            session.ensure_container("missing-uuid", "comments").status, "error",
+        )
+
+    def test_container_children_are_ordered_without_naming_a_type(self):
+        """A container holds one kind, so its uuid says what the type used to."""
+        session = Session("si-ordering")
+        session.identity
+        topic = session.create_child(
+            session.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+        container = session.ensure_container(topic.uuid, "comments").value
+        for text in ("first", "second"):
+            session.create_child(
+                container.uuid,
+                {
+                    "type": "comment",
+                    "text": text,
+                    "order": session.next_child_order(container.uuid),
+                },
+                {},
+            )
+
+        self.assertEqual(session.next_child_order(container.uuid), 2.0)
+        # The topic root still holds mixed kinds, so naming one still narrows.
+        self.assertEqual(session.next_child_order(topic.uuid), 1.0)
+        self.assertEqual(session.next_child_order(topic.uuid, "comment"), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

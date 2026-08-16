@@ -630,10 +630,7 @@ class Session:
 
     def _folder(self, parent: ProtocolNode, name: str,
                node_type: str = "folder") -> ProtocolNode:
-        for child in parent.children:
-            if child.data.get("name") == name and child.data.get("type") in ("folder", node_type):
-                return child
-        return self.create_child(parent.uuid, {"type": node_type, "name": name}, {}).value
+        return self.ensure_container(parent.uuid, name, node_type).value
 
     @property
     @_session_locked
@@ -1157,9 +1154,10 @@ class Session:
         identity_key = str(identity.data.get("identity_key") or "")
 
         def retain(node: ProtocolNode) -> None:
+            in_agenda = self._is_agenda_container(node)
             kept = []
             for child in node.children:
-                if child.data.get("type") == "agenda_item" and not (
+                if in_agenda and not (
                     child.data.get("author") == identity.uuid
                     and child.revision_origin == identity_key
                 ):
@@ -1588,7 +1586,8 @@ class Session:
 
     @_session_locked
     def create_child(self, parent_uuid: str, data: dict,
-                     weights: dict[str, float] | None = None) -> SessionResult:
+                     weights: dict[str, float] | None = None,
+                     node_uuid: str | None = None) -> SessionResult:
         if (
             not self._creating_identity
             and not (
@@ -1608,6 +1607,7 @@ class Session:
         revision_seq = self._next_local_revision_seq(revision_origin)
         result = self._protocol.create_child(
             parent_uuid, data, weights, revision_origin, revision_seq,
+            node_uuid,
         )
         if not result.ok:
             return SessionResult("error", reason=result.reason)
@@ -1623,6 +1623,40 @@ class Session:
             revision_seq=child.revision_seq,
         )
         return SessionResult("ok", value=self._snapshot_node(child))
+
+    @_session_locked
+    def ensure_container(self, parent_uuid: str, name: str,
+                         node_type: str = "folder") -> SessionResult:
+        """Find or create a named container child, and return it.
+
+        A container is how an application names a set of nodes without Core
+        reading what they are: it hands Core the container's uuid, and
+        ordering and adoption declarations then address a place in the tree
+        rather than a string inside `data`. The application keeps the naming
+        convention, which is its own structure to define; Core only keeps the
+        place.
+
+        Idempotent by name, so the caller may run it on every startup rather
+        than recording whether it has run before.
+
+        A new one is given a uuid derived from its parent's, which is what
+        lets two clients arrive at the same container without either adopting
+        it from the other: the data is identical and neither timestamps nor
+        uuids enter the content hash, so the copies reconcile as agreement. A
+        peer's child of that container then finds its parent already here,
+        which a container invented independently on each side would not.
+        """
+        parent = self._protocol.index.get(parent_uuid)
+        if parent is None:
+            return SessionResult("error", reason="parent not found")
+        for child in parent.live_children():
+            if (child.data.get("name") == name
+                    and child.data.get("type") == node_type):
+                return SessionResult("ok", value=self._snapshot_node(child))
+        return self.create_child(
+            parent_uuid, {"type": node_type, "name": name}, {},
+            node_uuid=f"{name}:{parent_uuid}",
+        )
 
     @_session_locked
     def modify(self, node_uuid: str, data: dict,
@@ -3078,25 +3112,72 @@ class Session:
 
     # An agenda is what a topic's participants want to talk about, merged
     # across everyone discussing it. That is a collaboration primitive, not a
-    # property of boards, and it needs no new storage: an agenda item is
-    # already a child of the topic root, and every application's topic is a
-    # root. Only the originator may edit or remove their own item; everyone
-    # sees the merged list.
+    # property of boards, and every application's topic is a root. Only the
+    # originator may edit or remove their own item; everyone sees the merged
+    # list.
     AGENDA_PRIORITIES = ("high", "medium", "low")
+    # Items hang off a container rather than the topic root, so a projection
+    # can address a peer's agenda by uuid instead of matching a type string
+    # against everything in their tree.
+    #
+    # The uuid is derived from the topic's, which is what makes that work
+    # across perspectives: every client reaches the same one on its own, with
+    # nobody adopting anything. The container's data is identical everywhere
+    # and neither timestamps nor uuids enter the content hash, so a peer's
+    # copy reconciles as agreement rather than as a change.
+    AGENDA_CONTAINER_TYPE = "agenda"
+
+    @staticmethod
+    def agenda_container_uuid(topic_uuid: str) -> str:
+        return f"agenda:{topic_uuid}"
+
+    def _agenda_container(self, topic_uuid: str,
+                          create: bool = True) -> ProtocolNode | None:
+        container_uuid = self.agenda_container_uuid(topic_uuid)
+        container = self._protocol.index.get(container_uuid)
+        if container is None:
+            if not create or self._protocol.index.get(topic_uuid) is None:
+                return None
+            created = self.create_child(
+                topic_uuid,
+                {"type": self.AGENDA_CONTAINER_TYPE, "name": "agenda"},
+                {},
+                node_uuid=container_uuid,
+            )
+            if created.status != "ok":
+                return None
+            container = self._protocol.index.get(container_uuid)
+        # Core's own rule, declared here once instead of by every application
+        # in turn: an agenda is projected from its author's perspective, so
+        # neither the container nor anything under it is ever adopted.
+        self.set_adoption_metadata(
+            container_uuid, adopt=ADOPT_NEVER, additions=ADOPT_NEVER,
+        )
+        return container
+
+    def _is_agenda_container(self, node: ProtocolNode) -> bool:
+        return node.uuid == self.agenda_container_uuid(node.parent_uuid or "")
     # Fractional-order reordering, generic over node type. A moved node gets an
     # "order" value midway between its new neighbours, so a single sibling
     # moves without renumbering the rest. Nodes without an explicit order fall
     # back to their creation position, so the scheme works before anything has
     # ever been moved. Agenda items, agreement sections, and agreement clauses
     # all share this.
-    def _ordered_children(self, parent_uuid: str, node_type: str) -> list[ProtocolNode]:
+    def _ordered_children(self, parent_uuid: str,
+                          node_type: str | None = None) -> list[ProtocolNode]:
+        """This parent's live children in order, optionally of one type.
+
+        `node_type` narrows a parent whose children are of mixed kinds. A
+        container holds one kind, so its uuid says everything the type used to
+        and the argument is left out.
+        """
         parent = self._protocol.index.get(parent_uuid)
         if parent is None:
             return []
         items = sorted(
             [
                 child for child in parent.live_children()
-                if child.data.get("type") == node_type
+                if node_type is None or child.data.get("type") == node_type
             ],
             key=lambda node: node.created_at,
         )
@@ -3116,8 +3197,13 @@ class Session:
             return float(value)
         return fallback
 
-    def next_child_order(self, parent_uuid: str, node_type: str) -> float:
-        """The order value that appends a new child after every existing one."""
+    def next_child_order(self, parent_uuid: str,
+                         node_type: str | None = None) -> float:
+        """The order value that appends a new child after every existing one.
+
+        Omit `node_type` when the parent is a container: its children are one
+        kind by construction, so there is nothing to narrow.
+        """
         existing = self._ordered_children(parent_uuid, node_type)
         if not existing:
             return 0.0
@@ -3203,8 +3289,11 @@ class Session:
         """Agenda records stored in this client's own perspective."""
         identity = self.identity
         identity_key = str(identity.data.get("identity_key") or "")
+        container = self._agenda_container(topic_uuid, create=False)
+        if container is None:
+            return []
         return [
-            item for item in self._ordered_children(topic_uuid, "agenda_item")
+            item for item in self._ordered_children(container.uuid)
             if (
                 item.data.get("author") == identity.uuid
                 and item.revision_origin == identity_key
@@ -3215,7 +3304,7 @@ class Session:
     def project_nodes(
         self,
         topic_uuid: str,
-        node_type: str,
+        parent_uuid: str,
         *,
         included_addresses: set[str] | None = None,
         max_age_seconds: float | None = (
@@ -3224,6 +3313,11 @@ class Session:
         not_before: str | float | datetime | None = None,
     ) -> list[ProjectedNode]:
         """Project verified records without adopting them.
+
+        `topic_uuid` says whose perspectives to read; `parent_uuid` says which
+        container within each of them holds the records. The container carries
+        the same uuid in every perspective, so the caller names a place rather
+        than a type for Core to match.
 
         Core reports and filters factual time information supplied by the
         caller. It assigns no universal meaning to "current" beyond the
@@ -3247,7 +3341,7 @@ class Session:
                 channel_kind=None,
             )
             self._collect_projected_candidates(
-                local_topic, node_type, source, candidates,
+                local_topic, parent_uuid, source, candidates,
             )
 
         permitted = included_addresses
@@ -3293,7 +3387,7 @@ class Session:
                 channel_kind=observation.channel_kind if observation else None,
             )
             self._collect_projected_candidates(
-                topic, node_type, source, candidates,
+                topic, parent_uuid, source, candidates,
             )
 
         resolved = [
@@ -3315,15 +3409,12 @@ class Session:
         items = [
             item for item in self.project_nodes(
                 topic_uuid,
-                "agenda_item",
+                self.agenda_container_uuid(topic_uuid),
                 included_addresses=included_addresses,
                 max_age_seconds=max_age_seconds,
                 not_before=not_before,
             )
-            if (
-                item.data.get("author") == item.perspective.identity_uuid
-                and item.node.parent_uuid == topic_uuid
-            )
+            if item.data.get("author") == item.perspective.identity_uuid
         ]
         return sorted(
             items,
@@ -3338,14 +3429,16 @@ class Session:
     def _collect_projected_candidates(
         self,
         topic: ProtocolNode,
-        node_type: str,
+        parent_uuid: str,
         source: PerspectiveSource,
         candidates: dict[str, list[tuple[ProtocolNode, PerspectiveSource]]],
     ) -> None:
-        for node in self._flatten_by_uuid(topic).values():
+        parent = self._flatten_by_uuid(topic).get(parent_uuid)
+        if parent is None:
+            return
+        for node in parent.live_children():
             if (
-                node.data.get("type") != node_type
-                or node.revision_origin != source.identity_key
+                node.revision_origin != source.identity_key
                 or self.revision_verification(node) != "valid"
             ):
                 continue
@@ -3451,8 +3544,11 @@ class Session:
         normalized = str(text or "").strip()
         if not normalized:
             return SessionResult("error", reason="discussion topic text is required")
+        container = self._agenda_container(topic_uuid)
+        if container is None:
+            return SessionResult("error", reason="agenda container unavailable")
         return self.create_child(
-            topic_uuid,
+            container.uuid,
             {
                 "type": "agenda_item",
                 "text": normalized,
@@ -3524,8 +3620,11 @@ class Session:
             return SessionResult(
                 "error", reason="only locally authored agenda items can be moved",
             )
+        container = self._protocol.index.get(item.parent_uuid or "")
+        if container is None:
+            return SessionResult("error", reason="agenda item not found")
         projected = self.agenda_projection(
-            item.parent_uuid,
+            container.parent_uuid,
             max_age_seconds=max_age_seconds,
             not_before=not_before,
         )
@@ -3626,14 +3725,18 @@ class Session:
     def _is_local_agenda_item(self, item: ProtocolNode) -> bool:
         identity = self.identity
         return (
-            item.data.get("type") == "agenda_item"
+            self._agenda_item(item.uuid) is not None
             and item.data.get("author") == identity.uuid
             and item.revision_origin == identity.data.get("identity_key")
         )
 
     def _agenda_item(self, item_uuid: str) -> ProtocolNode | None:
+        """A node is an agenda item by where it sits, not by what it says."""
         node = self._protocol.index.get(item_uuid)
-        if node is None or node.data.get("type") != "agenda_item":
+        if node is None:
+            return None
+        parent = self._protocol.index.get(node.parent_uuid or "")
+        if parent is None or not self._is_agenda_container(parent):
             return None
         return node
 
