@@ -27,3 +27,14 @@ review.
 Development-only dependency: pytest `>=8,<10` (MIT). Build-only dependency:
 setuptools `>=77` (MIT). Re-run and review this inventory whenever dependency
 ranges or resolved artifacts change.
+
+CI installs this closure as pip constraints on the audited platform - rendered
+from `dependency-inventory.json` by `tools/write_constraints.py`, so the
+inventory stays the single source of truth. A release upstream therefore no
+longer changes what that job resolves: `tools/check_dependency_inventory.py`
+fails when the closure changes shape and a licence needs reviewing, and a
+constrained install fails outright when a package can no longer be resolved
+alongside the reviewed set. Bumping a version is a deliberate edit here. The
+other CI jobs install unconstrained on purpose - the oldest supported Python
+proves the declared ranges still resolve, and the experimental job is where a
+breaking upstream release shows up first.
