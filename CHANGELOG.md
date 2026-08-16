@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.9
 
 - Added `Session.reconsider_adoption(topic_uuid)`: an application says its own
   settings changed and Core re-decides everything the topic is holding back —
@@ -103,6 +103,14 @@
 - Releasing a shared topic now withdraws its durable channel assignment even
   when the application has already removed the local topic node. This prevents
   an explicitly left topic from reappearing during the next relay poll.
+
+0.1.8 was prepared but never published, so everything written for it is
+released here. Both the public API and the wire formats changed since 0.1.7:
+the release contract adds `LastWriteWinsPolicy`, `PerspectiveObservation`,
+`PerspectiveSource` and `ProjectedNode`, and removes nothing, while protocol
+schema 2 → 4, session envelope 1 → 2, connect token 2 → 3 and Core profile
+schema 1 → 2 are clean breaks - sessions and envelopes written by 0.1.7 are
+rejected rather than migrated.
 
 ## 0.1.7
 
