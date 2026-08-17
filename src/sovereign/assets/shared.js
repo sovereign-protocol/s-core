@@ -1890,24 +1890,44 @@ Object.assign(SovereignShell, {
       ? "Open transitions"
       : "Everything on this topic is Aligned";
     if (!status) return;
-    status.hidden = false;
     // Each side is told about its own obligation, so the two screens never
     // contradict each other: only a conflict is mine to resolve, an incoming
     // change is mine to review, and my own change in flight is neither.
-    if (conflicts) {
-      status.textContent = `${conflicts} to resolve`;
-      status.dataset.state = "conflict";
-    } else if (mine) {
-      status.textContent = `${mine} to review`;
-      status.dataset.state = "review";
-    } else if (items.length) {
-      status.textContent = `${items.length} in transition`;
-      status.dataset.state = "pending";
-    } else {
-      status.textContent = "Aligned";
-      status.dataset.state = "in_agreement";
-    }
+    //
+    // Every non-empty band is shown, not just the worst of them: one thing to
+    // review and one still travelling are two different facts about two
+    // different nodes, and reporting only the more urgent one left the other
+    // invisible. Aligned says nothing at all - silence is the state, and the
+    // button's tooltip still says so on hover.
+    const transit = items.length - conflicts - mine;
+    const bands = [
+      { count: conflicts, state: "conflict", text: "to resolve" },
+      { count: mine, state: "review", text: "to review" },
+      { count: transit, state: "pending", text: "in transition" },
+    ].filter((band) => band.count > 0);
+    status.hidden = true;
+    for (const extra of this._statusBands || []) extra.remove();
+    this._statusBands = [];
+    if (!bands.length) return;
+    // The element already in the markup carries the first band, so a host
+    // that styles or queries it keeps working; the rest are siblings of it.
+    const [first, ...rest] = bands;
+    status.hidden = false;
+    status.textContent = `${first.count} ${first.text}`;
+    status.dataset.state = first.state;
     status.title = button.title;
+    let anchor = status;
+    for (const band of rest) {
+      const extra = status.cloneNode(false);
+      extra.textContent = `${band.count} ${band.text}`;
+      extra.dataset.state = band.state;
+      extra.title = button.title;
+      extra.hidden = false;
+      extra.onclick = status.onclick;
+      anchor.after(extra);
+      anchor = extra;
+      this._statusBands.push(extra);
+    }
   },
 
   // Rendering the unsettled list is separate from where it is shown, so the

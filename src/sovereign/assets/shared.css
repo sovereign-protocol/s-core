@@ -926,15 +926,41 @@ dialog menu .danger:not(:last-child) {
 .shell-topic-status:hover {
   background: rgba(127, 127, 127, 0.32);
 }
+/* One colour per stage, in two tones: a filled dot and coloured text on a
+   dark header cannot be the same hex and still read as the same colour. Every
+   surface that reports a transition - the header band, the transition list,
+   the dot on a row - picks its tone from here and nowhere else. */
+:root {
+  --stage-conflict-fill: #dc2626;
+  --stage-conflict-text: #f87171;
+  --stage-review-fill: #f59e0b;
+  --stage-review-text: #f59e0b;
+  --stage-transit-fill: #8c9bab;
+  --stage-transit-text: #8c9bab;
+}
 .shell-topic-status[data-state="pending"] {
-  color: #8c9bab;
+  color: var(--stage-transit-text);
 }
 .shell-topic-status[data-state="review"] {
-  color: #f59e0b;
+  color: var(--stage-review-text);
 }
 .shell-topic-status[data-state="conflict"] {
-  color: #f87171;
+  color: var(--stage-conflict-text);
   font-weight: 600;
+}
+/* Bands sit side by side, so each reads as its own count. */
+.shell-topic-status + .shell-topic-status {
+  margin-left: 4px;
+}
+
+/* In flight and awaiting a peer share the grey, because neither is anybody's
+   move and the header counts both as "in transition". What separates them is
+   motion: a change that has left but that nobody has answered pulses, so the
+   window where nothing appears to be happening still says something is.
+   Defined here because every surface that reports a stage may use it. */
+@keyframes stage-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
 }
 .shell-brand {
   display: inline-flex;
@@ -1007,14 +1033,14 @@ dialog menu .danger:not(:last-child) {
   background: rgba(127, 127, 127, 0.1);
 }
 .shell-disagreement-row[data-status="conflict"] {
-  border-left-color: #dc2626;
+  border-left-color: var(--stage-conflict-fill);
 }
 .shell-disagreement-row[data-status="awaiting_me"] {
-  border-left-color: #f59e0b;
+  border-left-color: var(--stage-review-fill);
 }
 .shell-disagreement-row[data-status="awaiting_peer"],
 .shell-disagreement-row[data-status="in_flight"] {
-  border-left-color: #8c9bab;
+  border-left-color: var(--stage-transit-fill);
 }
 .shell-disagreement-label {
   white-space: pre-line;

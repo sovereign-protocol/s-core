@@ -160,7 +160,13 @@ class PackageLayoutTests(unittest.TestCase):
     def test_transition_surface_separates_all_items_from_actionable_work(self):
         self.assertIn("In transition", SHARED_JS)
         self.assertIn("Nothing in transition.", SHARED_JS)
-        self.assertIn("`${mine} to review`", SHARED_JS)
+        # Every non-empty band is reported, not just the most urgent one:
+        # one thing to review and one still travelling are two facts about
+        # two nodes, and showing only the first hid the second.
+        self.assertIn('text: "to review"', SHARED_JS)
+        self.assertIn('text: "to resolve"', SHARED_JS)
+        self.assertIn('text: "in transition"', SHARED_JS)
+        self.assertIn("`${first.count} ${first.text}`", SHARED_JS)
         self.assertNotIn("Current divergences", SHARED_JS)
 
     def test_confirmed_snapshot_replaces_optimistic_projection_atomically(self):

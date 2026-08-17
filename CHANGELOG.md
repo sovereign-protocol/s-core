@@ -2,6 +2,16 @@
 
 ## 0.1.9
 
+- **One palette for transition state, defined once.** A stage now has a colour
+  token in `shared.css` — conflict, awaiting me, in transition — in two tones,
+  because coloured text on a dark header and a filled dot cannot be the same
+  hex and still read as the same colour. `@keyframes stage-pulse` moved here
+  too: it was defined in one application's stylesheet, so the one surface that
+  happened to own it was the only one that could use it.
+- **The topic header reports every band, not only the worst.** One thing to
+  review and one still travelling are two facts about two nodes, and an
+  if/else chain showed the first and hid the second. Aligned now says nothing
+  at all — the button's tooltip still says so on hover.
 - Added `Session.ensure_container(parent_uuid, name, node_type)`: a named
   child an application uses to name a *place* rather than a type. It hands
   Core the container's uuid, so ordering, adoption declarations and hash
