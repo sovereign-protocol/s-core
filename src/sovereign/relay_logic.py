@@ -1364,12 +1364,21 @@ class RelayLogic:
                 "observed_publications", {},
             ).get(topic_uuid, {})
             observed_digest = self._observed_digest(topic_uuid)
-            if (self._state["published"].get(topic_uuid) == current_hash
+            # Whether the relay still holds our slot decides more than
+            # whether to skip: it also decides whether a head on its own is
+            # enough further down. A wiped or withdrawn publication leaves
+            # local bookkeeping saying the content is published while the
+            # relay holds neither head nor snapshot, and a head-only write
+            # would then name a snapshot that is not there.
+            relay_holds_publication = (
+                self._state["published"].get(topic_uuid) == current_hash
+                and self._relay_holds_our_publication(
+                    topic_uuid, peer_listings,
+                )
+            )
+            if (relay_holds_publication
                     and self._state["published_observations"].get(topic_uuid)
-                    == observed_digest
-                    and self._relay_holds_our_publication(
-                        topic_uuid, peer_listings,
-                    )):
+                    == observed_digest):
                 continue
             # Re-read hash and subtree together so the snapshot we write is
             # the one current_hash actually names (a concurrent apply between
@@ -1402,14 +1411,17 @@ class RelayLogic:
                 ack_publication_seq
             )
             self._save_state()
-            payload["_relay_observed"] = observed
-            payload["_relay_observed_publications"] = observed_publications
-            payload["_relay_publication_seq"] = publication_seq
-            payload["_relay_ack_publication_seq"] = ack_publication_seq
-            # Observation-only heads are acknowledgements. Requesting an
-            # acknowledgement for those would create an endless ack-of-ack
-            # loop, so only semantic topic publications request one.
-            payload["_relay_ack_requested"] = content_changed
+            publication = {
+                "publication_seq": publication_seq,
+                "ack_publication_seq": ack_publication_seq,
+                # Observation-only heads are acknowledgements. Requesting an
+                # acknowledgement for those would create an endless
+                # ack-of-ack loop, so only semantic topic publications
+                # request one.
+                "ack_requested": content_changed,
+                "observed": observed,
+                "observed_publications": observed_publications,
+            }
             blob_ids = referenced_blob_ids(payload.get("subtree"))
             leased: list[str] = []
             publish_ready = True
@@ -1446,9 +1458,23 @@ class RelayLogic:
                     continue
                 # The head is the commit point: every referenced blob is
                 # durable before another client can discover the snapshot.
-                self.storage.write_snapshot(
-                    topic_uuid, self.identity, current_hash, payload, blob_ids=blob_ids,
-                )
+                if content_changed or not relay_holds_publication:
+                    self.storage.write_snapshot(
+                        topic_uuid, self.identity, current_hash, payload,
+                        blob_ids=blob_ids, publication=publication,
+                    )
+                else:
+                    # Nothing to say, only something to acknowledge. The
+                    # snapshot this head names is already on the relay and,
+                    # being named after its own hash, is the same bytes -
+                    # rewriting the whole subtree to move a sequence number
+                    # cost four operations where two do, and made a
+                    # content-addressed file mutable, which is the only
+                    # reason a reader could ever catch it mid-change.
+                    self.storage.write_head(
+                        topic_uuid, self.identity, current_hash,
+                        blob_ids=blob_ids, publication=publication,
+                    )
             finally:
                 for blob_id in leased:
                     self.storage.delete_blob_lease(blob_id, self.identity)
@@ -1640,8 +1666,32 @@ class RelayLogic:
                     # state it reverted to over the sibling's, losing the
                     # work on both sides. Same trap the module docstring
                     # records for relay-applied peer content.
+                    #
+                    # A sibling writes here the same way a peer writes its
+                    # own slot, so the same evidence applies: an untouched
+                    # slot directory means nothing has been published into it
+                    # since this client last looked, and the question the
+                    # read answers has not changed. Left alone until last of
+                    # all the head reads, because being wrong here means
+                    # publishing over work somebody is about to be asked
+                    # about - which is why it is only ever skipped on the
+                    # aged-timestamp evidence _settle_slot insists on, and
+                    # never while an alarm is outstanding.
+                    settled = settled_mtimes.get(peer_id)
+                    if (
+                        settled is not None
+                        and self._slot_is_untouched(
+                            settled["directory"], listed_mtimes.get(peer_id),
+                        )
+                    ):
+                        continue
                     if self._reconcile_sibling_publication(topic_uuid):
                         applied.add((topic_uuid, peer_id))
+                    elif topic_uuid not in self._sibling_alarms:
+                        self._settle_slot(
+                            settled_mtimes, peer_id,
+                            listed_mtimes.get(peer_id), None,
+                        )
                     continue
                 peer_addr = f"relay:{peer_id}"
                 presence, _mtime = read_presence(peer_id)
@@ -1898,31 +1948,19 @@ class RelayLogic:
                         state_hash=state_hash,
                     )
                 else:
+                    # No generation check on what comes back. There used to
+                    # be one, because a publisher rewrote the snapshot under
+                    # an unchanged hash to move a sequence number, and a
+                    # reader between the head and the snapshot got two
+                    # generations mixed - twice in one traced restart. A
+                    # snapshot is now written once per hash and never
+                    # rewritten, so the file this head names either is that
+                    # hash's content or is not there at all, and "not there"
+                    # is already the next line.
                     payload = self.storage.read_snapshot(
                         topic_uuid, peer_id, state_hash,
                     )
                     if not payload:
-                        continue
-                    payload_publication_seq = payload.get(
-                        "_relay_publication_seq", 0,
-                    )
-                    if (
-                        publication_seq > 0
-                        and payload_publication_seq != publication_seq
-                    ):
-                        # The publisher advanced an unchanged-hash snapshot
-                        # between our head and snapshot reads. Do not combine
-                        # metadata from two generations; the fixed poll cadence
-                        # will fetch the new head promptly.
-                        self.session.trace_event(
-                            "relay.publication_snapshot_race",
-                            relay_identity=self.identity,
-                            topic_uuid=topic_uuid,
-                            peer_id=peer_id,
-                            head_publication_seq=publication_seq,
-                            snapshot_publication_seq=payload_publication_seq,
-                            state_hash=state_hash,
-                        )
                         continue
                 subtree = protocol_node_from_envelope(payload)
                 peer_copy = copy.deepcopy(subtree)

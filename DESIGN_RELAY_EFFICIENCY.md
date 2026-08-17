@@ -1,13 +1,19 @@
 # Relay efficiency
 
 A poll cycle must spend its round trips on questions it has not already
-answered. Today roughly half of them are spent re-asking.
+answered. When this was written, roughly half of them were spent re-asking.
 
-This plan is written from one live two-client session (A on 8501, B on 8502,
+The plan is written from one live two-client session (A on 8501, B on 8502,
 both against the same SFTP relay, traced at `timing` level for 22 minutes on
-2026-08-16). Every number below is measured, not estimated, and every
-redundancy named here is reproduced by a test in
-`tests/test_relay_efficiency.py`.
+2026-08-16). Every number is measured, not estimated, and every redundancy named
+here is reproduced by a test in `tests/test_relay_efficiency.py`.
+
+**All seven steps have landed.** An idle cycle went from `2 + 4 × topics`
+logical relay operations to `2 + topics` — 14 to 5 at three topics — and an
+acknowledgement from four operations rewriting the whole subtree to one head
+write. The sections below are kept as they were argued, each with what it
+actually cost and what it turned up; step 7 records why the mechanism it
+specified was dropped in favour of one that was already there.
 
 ## What the session cost
 
@@ -220,7 +226,7 @@ between cycles is still read; a backend whose clock cannot resolve the interval
 never settles anything; a returning peer whose slot reappears is read again; a
 topic waiting to be grafted keeps being offered. Plus the budget test.
 
-## Step 6 — An acknowledgement should not rewrite a subtree
+## Step 6 — An acknowledgement should not rewrite a subtree — **done**
 
 Seven of A's sixteen board publications carried no content change
 (`ack_requested: false`) — pure "I saw your seq N" bookkeeping. Each one still
@@ -249,86 +255,110 @@ the snapshot, `snapshots/<hash>.json` is immutable by construction and this race
 cannot arise from an acknowledgement at all. That is the real argument for this
 step; the four saved operations are a bonus.
 
-The obstacle is that the head's metadata is smuggled through the snapshot
+The obstacle was that the head's metadata was smuggled through the snapshot
 payload. `_relay_observed`, `_relay_observed_publications`,
-`_relay_ack_publication_seq` and `_relay_ack_requested` are written into every
-snapshot **solely so `write_snapshot` can copy them into `head.json`**
-(`relay_storage.py:408-425`). The only field ever read back out of a downloaded
-snapshot is `_relay_publication_seq`, at `relay_logic.py:1810`.
+`_relay_ack_publication_seq` and `_relay_ack_requested` were written into every
+snapshot **solely so `write_snapshot` could copy them into `head.json`**. The
+only field ever read back out of a downloaded snapshot was
+`_relay_publication_seq`, and the only thing reading it was the race check that
+existed because of it.
 
-**Change, in two parts.**
+**What changed.** `head_document()` builds the head from a `publication`
+argument, and both backends take it. `write_head()` writes that head without the
+subtree, and `publish_due_topics` routes to it when the content has not changed.
+A snapshot is now a pure function of the hash it is named after.
 
-1. Pass head metadata to `write_snapshot` as arguments instead of stuffing it
-   into the payload. Every snapshot on every relay gets smaller and the head
-   stops being a derived copy of something it should have owned outright.
-2. Add `write_head(topic_uuid, peer_id, ...)` for a publication whose hash is
-   unchanged, and route observation-only publications to it.
+**The race check is gone rather than relaxed.** The plan called for weakening it
+to `payload_seq > publication_seq`. That was the right fix for a mutable
+snapshot; with an immutable one there is nothing left to check. `snapshots/<hash>.json`
+is written once and never rewritten, so the file a head names either holds that
+hash's content or is not there — and "not there" was already handled on the next
+line. Keeping a check that can no longer fire would have left the reason for it
+unrecorded and the code lying about the risk.
 
-**One trap to close with it.** The snapshot-race check at
-`relay_logic.py:1814` refuses a payload whose `_relay_publication_seq` differs
-from the head's. Once a head can advance without its snapshot, a first-time
-reader would meet head seq 27 against snapshot seq 26 and skip the topic
-indefinitely - trading a two-second stall for a permanent one. The check must
-become `payload_seq > publication_seq`: a snapshot from a *newer* generation is
-the real race, while an older one carrying the head's hash is content-identical
-by definition. Do not land part 2 without this.
+**One thing the routing has to get right, found by the tests.** "Content did not
+change" is not the same as "the snapshot is on the relay". After a wipe, or a
+withdrawn publication, local bookkeeping still says the content is published
+while the relay holds neither head nor snapshot — and a head-only write would
+name a snapshot that is not there. So the head-only path is taken only when the
+relay was confirmed to still hold our slot this cycle, which
+`_relay_holds_our_publication` already establishes for the skip decision just
+above. `test_relay_authority` caught both cases.
 
-**Acceptance.** `test_an_acknowledgement_does_not_rewrite_the_subtree` (already
-written, currently `expectedFailure`), plus two regression tests this step's own
-change makes necessary: a peer arriving after an observation-only publication
-still receives the topic, and a snapshot older than its head is accepted rather
-than raced. Live proof that it worked would be a restart under load with no
-`relay.publication_snapshot_race` in the trace.
+**Acceptance.** `test_an_acknowledgement_does_not_rewrite_the_subtree` (no
+longer `expectedFailure`); `test_one_change_costs_one_subtree_write_and_one_acknowledgement`
+— the author writes its subtree once and the peer answers with a head and
+nothing else; `test_a_peer_arriving_after_an_acknowledgement_still_gets_the_topic`
+— the head an acknowledgement leaves behind still names a snapshot that is
+there.
 
-## Step 7 — Presence as a manifest
+## Step 7 — The last head read — **done, by other means**
 
-The structural fix, and the only one that changes the shape of the cost rather
-than its constant.
+This step was written as "presence as a manifest": give
+`identities/<peer>/presence.json` a `topic_heads` map so one presence read
+answers "has anything changed anywhere" and no head is read on an idle cycle.
+Target, `2 + topics`.
 
-Every client already writes `identities/<peer>/presence.json` once per cycle,
-unconditionally, and every peer already reads it once per cycle
-(`relay_logic.py:1495` caches it across topics for exactly this reason). Give it
-`topic_heads: {topic_uuid: {hash, publication_seq, ack_publication_seq}}` and an
-idle poll needs **no per-topic head reads at all**: one presence read per peer
-answers "has anything changed anywhere", and a head is read only where the hash
-differs.
+**The target is met. The manifest is not what met it, and should not be built.**
 
-Idle cost goes from `2 + 4 × topics` to roughly `2 + topics` (the peer listing
-that discovers newcomers), and stops growing with peers × topics.
+Step 5 had already removed every peer head read, using the slot mtime the peer
+listing carries. What remained at `2 + 2 × topics` was one listing and *our own*
+slot's head per topic — the sibling rule's read, deliberately left alone then.
+It is now skipped on exactly the same evidence: a sibling writes into that slot
+the way anyone writes theirs, so the listing shows it. That is the whole of this
+step, and it lands the budget at **`2 + topics` — 5 operations at three topics,
+measured, down from 14.**
 
-**The ordering caveat.** Presence is written *before* publish inside a cycle
-(`relay_logic.py:789`), so a change published in cycle N would not reach the
-manifest until cycle N+1 — up to 3 s added to the 1.5–2.9 s propagation this
-plan must not regress. `publish_once` must therefore refresh presence after a
-publication: one extra operation, only when something actually changed.
+Three reasons the manifest was dropped rather than deferred:
 
-Presence is per identity and reachability is per topic — the same tension
-`relay_logic.py:657` already resolves by putting `topic_uuids` in the payload.
-This step extends that list rather than introducing a new concept.
+1. **It cannot safely skip a read.** Presence is written before publish within a
+   cycle, so a peer that publishes after writing presence leaves a manifest that
+   is a generation stale. Refreshing presence after publication narrows the
+   window but cannot close it — a crash between the two leaves a manifest that
+   is permanently wrong. A stale manifest may therefore only ever *add* a reason
+   to read, never justify skipping one, so it cannot replace the slot mtime.
+   Which makes it cost without benefit.
+2. **It re-creates what step 6 just removed.** Step 6's finding was that head
+   metadata smuggled through another file makes that file mutable and its
+   authority unclear. Copying head hashes into presence is the same move, into a
+   file rewritten every cycle by every client.
+3. **Siblings share a presence file.** Two clients of one person write
+   `identities/<identity>/presence.json` in turn, so a manifest there is
+   whichever sibling wrote last — the one place the answer must be exact.
 
-**Acceptance.** Idle budget `2 + topics`; end-to-end propagation test still
-within one poll interval; existing `test_relay_authority` suite unchanged.
+**What is left, and why it stays.** One `list_peers_with_mtimes` per topic. It
+cannot come from presence, because presence means *alive* and a mailbox has to
+stay readable when its publisher is not: a client that published and then went
+offline must still be found. Removing it would trade a round trip for the
+property that makes this a relay rather than a session. The remaining fixed cost
+is the heartbeat write and one heartbeat read per peer.
+
+**Acceptance.** Idle budget `2 + topics`, asserted per topic count;
+`test_a_sibling_writing_into_our_own_slot_is_still_seen` — the slot is read
+again as soon as a sibling writes to it, and the sibling rule runs on what it
+finds.
 
 ## Sequencing
 
-Steps 1, 2 and 3 landed together; 4 and 5 landed together, 4 first because 5
-needs the mtime to be free. 6 precedes 7, because 7 makes head writes frequent
-and 6 makes them cheap. 7 is the only step that changes the relay's on-disk
-contract and should land alone.
+All seven have landed: 1–3 together, then 4 and 5 (4 first, because 5 needs the
+mtime to be free), then 6 and 7 (6 first, so that the head writes 7 leans on are
+already cheap).
 
 | step | idle ops (3 topics) | of a 3 s cycle |
 |---|---|---|
 | before | 14 | ~1.35 s |
-| after 2 (**done**) | 11 | ~1.05 s |
-| after 5 (**done**) | 8 | ~0.75 s |
-| after 7 | 5 | ~0.45 s |
+| after 2 | 11 | ~1.05 s |
+| after 5 | 8 | ~0.75 s |
+| after 7 | **5** | ~0.45 s |
 
-What remains on an idle cycle is one listing and one own-slot head read per
-topic, plus the two heartbeat operations. The own-slot read is the sibling
-rule's, and the same mtime evidence step 5 uses could retire it — deliberately
-left alone, because that path decides whether publishing would overwrite work a
-person is about to be asked about, and it is not where to be clever for one
-round trip.
+An idle cycle is now a heartbeat write, a heartbeat read per peer, and one
+listing per topic. Every one of those answers a question nothing else in the
+cycle has answered: whether we are still alive, whether the peer is, and who is
+in the topic. Nothing further can come out without giving something up — which
+is the point at which a cost plan should stop.
+
+The write side is bounded too: one subtree write per change by its author, and a
+head and nothing more from everyone acknowledging it.
 
 ### What step 3 cost elsewhere
 

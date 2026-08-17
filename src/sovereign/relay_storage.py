@@ -27,7 +27,16 @@ Offered API:
     roughly two timeouts rather than the minute the old default allowed.
     Raise it with relay_sftp_operation_timeout for a genuinely slow link.
     Both satisfy RelayStorage, including:
-    write_snapshot(topic_uuid, peer_id, state_hash, payload)
+    write_snapshot(topic_uuid, peer_id, state_hash, payload, blob_ids,
+                   publication)
+      Writes the subtree and the head that names it. `publication` carries
+      the head's own metadata (sequence, acknowledgement, observations); it
+      is not part of the snapshot, so `snapshots/<hash>.json` is a pure
+      function of the hash and never rewritten under it.
+    write_head(topic_uuid, peer_id, state_hash, blob_ids, publication)
+      The same head without the subtree, for a publication whose content did
+      not change - an acknowledgement moving a sequence number. Two
+      operations rather than four, and it leaves the snapshot alone.
     read_head(topic_uuid, peer_id) -> dict | None
     read_snapshot(topic_uuid, peer_id, state_hash) -> dict | None
     list_peers(topic_uuid) -> list[str]
@@ -104,6 +113,36 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def head_document(topic_uuid: str, peer_id: str, state_hash: str,
+                  blob_ids: set[str] | None, publication: dict | None,
+                  previous: dict) -> dict:
+    """The head a publication writes, from what the publisher passed in.
+
+    The publication metadata used to travel inside the snapshot payload, on
+    `_relay_*` keys, purely so this function could copy it back out. Nothing
+    ever read those keys off a downloaded snapshot except a race check that
+    existed because of them. Taking them as an argument instead is what makes
+    a head-only write expressible - and it makes `snapshots/<hash>.json` a
+    pure function of the hash it is named after, which is the property a
+    content-addressed file should have had all along.
+    """
+    publication = publication or {}
+    return {
+        "peer": peer_id,
+        "topic": topic_uuid,
+        "hash": state_hash,
+        "publication_seq": publication.get("publication_seq", 0),
+        "ack_requested": bool(publication.get("ack_requested", False)),
+        "ack_publication_seq": publication.get("ack_publication_seq", 0),
+        "updated_at": now_iso(),
+        "snapshot": f"snapshots/{state_hash}.json",
+        "observed": publication.get("observed", {}),
+        "observed_publications": publication.get("observed_publications", {}),
+        "blobs": sorted(blob_ids or set()),
+        "previous_blobs": sorted(previous.get("blobs") or []),
+    }
+
+
 @runtime_checkable
 class RelayStorage(Protocol):
     """Storage contract required by one relay polling endpoint."""
@@ -113,6 +152,12 @@ class RelayStorage(Protocol):
     def write_snapshot(
         self, topic_uuid: str, peer_id: str, state_hash: str,
         payload: dict, blob_ids: set[str] | None = None,
+        publication: dict | None = None,
+    ) -> None: ...
+
+    def write_head(
+        self, topic_uuid: str, peer_id: str, state_hash: str,
+        blob_ids: set[str] | None = None, publication: dict | None = None,
     ) -> None: ...
 
     def verify_access(self) -> None: ...
@@ -157,31 +202,16 @@ class LocalFolderRelayStorage:
         """Local filesystem storage owns no persistent connection."""
 
     def write_snapshot(self, topic_uuid: str, peer_id: str, state_hash: str,
-                       payload: dict, blob_ids: set[str] | None = None) -> None:
+                       payload: dict, blob_ids: set[str] | None = None,
+                       publication: dict | None = None) -> None:
         peer_dir = self._peer_dir(topic_uuid, peer_id)
         snapshots_dir = peer_dir / "snapshots"
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         previous = self._read_json(peer_dir / "head.json") or {}
         self._write_json(snapshots_dir / f"{state_hash}.json", payload)
-        head = {
-            "peer": peer_id,
-            "topic": topic_uuid,
-            "hash": state_hash,
-            "publication_seq": payload.get("_relay_publication_seq", 0),
-            "ack_requested": bool(payload.get("_relay_ack_requested", False)),
-            "ack_publication_seq": payload.get(
-                "_relay_ack_publication_seq", 0,
-            ),
-            "updated_at": now_iso(),
-            "snapshot": f"snapshots/{state_hash}.json",
-            "observed": payload.get("_relay_observed", {}),
-            "observed_publications": payload.get(
-                "_relay_observed_publications", {},
-            ),
-            "blobs": sorted(blob_ids or set()),
-            "previous_blobs": sorted(previous.get("blobs") or []),
-        }
-        self._write_json(peer_dir / "head.json", head)
+        self._write_json(peer_dir / "head.json", head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
         # GC superseded snapshots (review R-4): keep the new one plus the
         # immediately-previous head's, so a lagging peer mid-fetch of the
         # prior hash still finds it; older ones would otherwise accumulate
@@ -190,6 +220,15 @@ class LocalFolderRelayStorage:
         for entry in snapshots_dir.iterdir():
             if entry.is_file() and entry.name not in keep:
                 entry.unlink()
+
+    def write_head(self, topic_uuid: str, peer_id: str, state_hash: str,
+                   blob_ids: set[str] | None = None,
+                   publication: dict | None = None) -> None:
+        peer_dir = self._peer_dir(topic_uuid, peer_id)
+        previous = self._read_json(peer_dir / "head.json") or {}
+        self._write_json(peer_dir / "head.json", head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
 
     def verify_access(self) -> None:
         """Verify that the configured relay root is writable."""
@@ -429,34 +468,28 @@ class SftpRelayStorage:
         self._reset_connection()
 
     def write_snapshot(self, topic_uuid: str, peer_id: str, state_hash: str,
-                       payload: dict, blob_ids: set[str] | None = None) -> None:
+                       payload: dict, blob_ids: set[str] | None = None,
+                       publication: dict | None = None) -> None:
         peer_dir = self._peer_dir(topic_uuid, peer_id)
         snapshots_dir = posixpath.join(peer_dir, "snapshots")
         previous = self._read_json(posixpath.join(peer_dir, "head.json")) or {}
         self._write_json(posixpath.join(snapshots_dir, f"{state_hash}.json"), payload)
-        head = {
-            "peer": peer_id,
-            "topic": topic_uuid,
-            "hash": state_hash,
-            "publication_seq": payload.get("_relay_publication_seq", 0),
-            "ack_requested": bool(payload.get("_relay_ack_requested", False)),
-            "ack_publication_seq": payload.get(
-                "_relay_ack_publication_seq", 0,
-            ),
-            "updated_at": now_iso(),
-            "snapshot": f"snapshots/{state_hash}.json",
-            "observed": payload.get("_relay_observed", {}),
-            "observed_publications": payload.get(
-                "_relay_observed_publications", {},
-            ),
-            "blobs": sorted(blob_ids or set()),
-            "previous_blobs": sorted(previous.get("blobs") or []),
-        }
-        self._write_json(posixpath.join(peer_dir, "head.json"), head)
+        self._write_json(posixpath.join(peer_dir, "head.json"), head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
         self._gc_snapshots(
             snapshots_dir,
             keep={f"{state_hash}.json", f"{previous.get('hash')}.json"},
         )
+
+    def write_head(self, topic_uuid: str, peer_id: str, state_hash: str,
+                   blob_ids: set[str] | None = None,
+                   publication: dict | None = None) -> None:
+        peer_dir = self._peer_dir(topic_uuid, peer_id)
+        previous = self._read_json(posixpath.join(peer_dir, "head.json")) or {}
+        self._write_json(posixpath.join(peer_dir, "head.json"), head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
 
     def _gc_snapshots(self, snapshots_dir: str, keep: set[str]) -> None:
         # Drop superseded snapshots (review R-4), keeping the new head's

@@ -36,7 +36,8 @@ from sovereign.topic_registry import ApplicationRegistration
 # Listed rather than inferred, so a method added to the contract has to be
 # classified deliberately instead of silently escaping the budget.
 RELAY_OPERATIONS = frozenset({
-    "write_snapshot", "read_head", "read_head_with_mtime", "read_snapshot",
+    "write_snapshot", "write_head",
+    "read_head", "read_head_with_mtime", "read_snapshot",
     "list_peers", "list_peers_with_mtimes", "list_topics",
     "delete_publication", "delete_topic",
     "write_presence", "read_presence_with_mtime", "timing_probe",
@@ -48,14 +49,13 @@ RELAY_OPERATIONS = frozenset({
 #   1  write_presence          the heartbeat, unconditional by design
 #   1  read_presence_with_mtime the peer's heartbeat, cached across topics
 # and per topic:
-#   1  list_peers_with_mtimes  once per cycle, reused by publication, and the
-#                              mtimes tell us which heads are worth reading
-#   1  read_head               our own slot, for the sibling rule
-# A peer's head is no longer read on an idle cycle at all. What is left is one
-# listing and one own-slot read per topic; step 7 of DESIGN_RELAY_EFFICIENCY.md
-# takes the listing out too.
+#   1  list_peers_with_mtimes  once per cycle, reused by publication, and its
+#                              mtimes say which slots are worth reading at all
+# No head is read on an idle cycle - not a peer's, not our own. What is left
+# is the listing that discovers peers and notices departures, which cannot be
+# inferred from anything already in hand.
 IDLE_FIXED_OPERATIONS = 2
-IDLE_OPERATIONS_PER_TOPIC = 2
+IDLE_OPERATIONS_PER_TOPIC = 1
 
 
 class _CountingStorage:
@@ -253,7 +253,6 @@ class IdlePollCycleCostTests(RelayEfficiencyCase):
             "write_presence": 1,
             "read_presence_with_mtime": 1,
             "list_peers_with_mtimes": 3,
-            "read_head": 3,
         })
 
     def test_an_idle_cycle_moves_no_content(self):
@@ -462,6 +461,50 @@ class SilenceIsOnlyTrustedWhenItIsProofTests(RelayEfficiencyCase):
 
         self.assertEqual(relay_b.storage.calls["read_head_with_mtime"], 1)
 
+    def test_a_sibling_writing_into_our_own_slot_is_still_seen(self):
+        # The own-slot read is the sibling rule's, and skipping it is the
+        # last and least comfortable of these savings: being wrong means
+        # publishing over work somebody is about to be asked about. A sibling
+        # writes into the slot the same way anyone else writes theirs, so the
+        # listing shows it - but that has to be true, not assumed.
+        session_a, relay_a, made = self.publisher(1)
+        topic = made[0]
+        self.settle(relay_a)
+        relay_a.poll_once()
+        self.assertEqual(relay_a.storage.calls["read_head"], 0)
+
+        # A second client of the same person, publishing under the shared
+        # identity from work built on what this one already published.
+        sibling_session = Session("addr-a2")
+        sibling_topics = register_notes_app(sibling_session)
+        # Same publication identity, its own bookkeeping - a sibling is
+        # another machine, not another object sharing this one's state file.
+        sibling = RelayLogic(sibling_session, {
+            "relay_root": self.relay_root,
+            "relay_identity": "A",
+            "relay_state_file": str(Path(self.state_dir) / "A-laptop.json"),
+        })
+        sibling.storage = _CountingStorage(sibling.storage)
+        sibling.set_scoped_topics({topic.uuid})
+        sibling.poll_and_apply()
+        sibling_topics.append(sibling_session.protocol.index[topic.uuid])
+        sibling_session.modify(
+            topic.uuid,
+            {**sibling_session.protocol.index[topic.uuid].data, "name": "by the laptop"},
+            {},
+        )
+        sibling.publish_due_topics()
+
+        relay_a.storage.reset()
+        result = relay_a.poll_once()
+
+        # The slot was read again, and the sibling rule ran on what it found
+        # and reported work. What that rule then decides - take, or raise an
+        # alarm for the person - is test_sibling_clients.py's subject; what
+        # matters here is that skipping the read never hides the question.
+        self.assertEqual(relay_a.storage.calls["read_head"], 1)
+        self.assertIn((topic.uuid, "A"), result.applied)
+
     def test_a_returning_peer_is_read_again(self):
         # A withdrawn publication clears `applied`, and the settled mtime has
         # to go with it - otherwise the slot reappears with the mtime it left
@@ -528,13 +571,13 @@ class NoRedundantContentTransferTests(RelayEfficiencyCase):
             "the peer cache must hold what a fetch would have produced",
         )
 
-    @unittest.expectedFailure
     def test_an_acknowledgement_does_not_rewrite_the_subtree(self):
-        # Step 6. An observation-only publication carries no content change,
-        # but publish_due_topics has only one way to write - the full
-        # write_snapshot path - so it rewrites the entire subtree to move a
-        # sequence number. Seven of sixteen board publications in the traced
-        # session were this.
+        # An observation-only publication carries no content change, so it
+        # writes a head and leaves the subtree alone. Seven of sixteen board
+        # publications in the traced session were this, each rewriting the
+        # whole tree to move a sequence number - and making a file named
+        # after its own hash mutable, which is what let a reader catch one
+        # mid-change.
         _, relay_a, made = self.publisher(1)
         _, relay_b = self.subscriber({node.uuid for node in made})
 
@@ -549,11 +592,12 @@ class NoRedundantContentTransferTests(RelayEfficiencyCase):
         ]
         self.assertEqual(rewritten, [])
 
-    def test_convergence_settles_instead_of_acknowledging_forever(self):
+    def test_one_change_costs_one_subtree_write_and_one_acknowledgement(self):
         # The acknowledgement protocol's own termination: ack_requested is
-        # false for observation-only heads (relay_logic.py:1322), so the pair
-        # goes quiet rather than trading acks of acks. This is the invariant
-        # the step 6 rework must not break.
+        # false for observation-only heads, so the pair goes quiet rather than
+        # trading acks of acks. What each side pays to get there is the point
+        # of step 6 - the author writes its subtree once, and the peer, whose
+        # own content did not change, answers with a head and nothing else.
         session_a, relay_a, made = self.publisher(1)
         _, relay_b = self.subscriber({node.uuid for node in made})
         self.settle(relay_a, relay_b, cycles=6)
@@ -565,15 +609,46 @@ class NoRedundantContentTransferTests(RelayEfficiencyCase):
             relay_a.poll_once()
 
         self.assertEqual(relay_a.storage.calls["write_snapshot"], 1)
-        self.assertEqual(relay_b.storage.calls["write_snapshot"], 1)
+        self.assertEqual(relay_b.storage.calls["write_snapshot"], 0)
+        self.assertEqual(relay_b.storage.calls["write_head"], 1)
 
         relay_a.storage.reset()
         relay_b.storage.reset()
         for _ in range(3):
             relay_a.poll_once()
             relay_b.poll_once()
-        self.assertEqual(relay_a.storage.calls["write_snapshot"], 0)
-        self.assertEqual(relay_b.storage.calls["write_snapshot"], 0)
+        for relay in (relay_a, relay_b):
+            self.assertEqual(relay.storage.calls["write_snapshot"], 0)
+            self.assertEqual(relay.storage.calls["write_head"], 0)
+
+    def test_a_peer_arriving_after_an_acknowledgement_still_gets_the_topic(self):
+        # The head a bare acknowledgement leaves behind still has to name a
+        # snapshot that is there. Nothing checks that on the write side, so a
+        # third client reading the topic for the first time is the test.
+        session_a, relay_a, made = self.publisher(1)
+        topic = made[0]
+        _, relay_b = self.subscriber({topic.uuid})
+        # Counted rather than settled: the acknowledgement this is about
+        # happens during convergence, and settle() clears the record of it.
+        for _ in range(6):
+            relay_a.poll_once()
+            relay_b.poll_once()
+        self.assertGreater(relay_a.storage.calls["write_head"], 0)
+        # One subtree write, from publishing the topic in the first place -
+        # the acknowledgements above it added none.
+        self.assertEqual(relay_a.storage.calls["write_snapshot"], 1)
+
+        session_c = Session("addr-c")
+        register_notes_app(session_c)
+        relay_c = self.connect(session_c, "C")
+        relay_c.set_scoped_topics({topic.uuid})
+        relay_c.mark_topics_desired([topic.uuid])
+
+        self.assertIn((topic.uuid, "A"), relay_c.poll_and_apply())
+        self.assertEqual(
+            session_c.node_state_hash(topic.uuid),
+            session_a.node_state_hash(topic.uuid),
+        )
 
 
 class LocalWorkLeavesWithoutPayingForInboundSyncTests(RelayEfficiencyCase):
