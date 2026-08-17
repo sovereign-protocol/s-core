@@ -242,6 +242,11 @@ button.danger {
 .ui-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .ui-avatar[data-owner="true"] { box-shadow: 0 0 0 2px #f59e0b; }
 .ui-avatar[data-self="true"] { border-color: var(--teal); }
+/* Two badge families, and the difference is what each one is about.
+   An entity badge is a *thing* - a person, a team, a role, a membership -
+   and carries an icon or an avatar. A tag below is a *fact about* something,
+   carries no icon, and is never a control. Anything that looks like a badge
+   belongs to one of the two. */
 .ui-entity-badge {
   position: relative;
   display: inline-flex;
@@ -254,9 +259,49 @@ button.danger {
   border-radius: 999px;
   background: rgba(127, 127, 127, 0.08);
   color: inherit;
+  /* A badge is a <button> when it is a control and a <span> when it is not,
+     and a button inherits neither family nor weight. Without this the same
+     badge rendered in two sizes depending on whether you could click it -
+     which read as one person's badge being bigger than another's. */
+  font: inherit;
   font-size: 12px;
   line-height: 1.2;
   white-space: nowrap;
+}
+/* Clicking a role badge steps out of it, which nothing said. A control says
+   so under the pointer; one that is disabled keeps the default cursor and
+   stays where it is. */
+button.ui-entity-badge:not(:disabled) {
+  cursor: pointer;
+}
+button.ui-entity-badge:not(:disabled):hover,
+button.ui-entity-badge:not(:disabled):focus-visible {
+  border-color: var(--proposal, #6ea8fe);
+  background: rgba(127, 127, 127, 0.18);
+}
+
+/* A fact about something: a state, a proposal, a count. Small, quiet, and
+   never clickable - if it can be acted on it is an entity badge instead. */
+.ui-tag {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 1px 8px;
+  border: 1px solid var(--line, rgba(127, 127, 127, 0.35));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted, #9aa4b2);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+/* Dashed says "not settled" wherever it appears - a proposal, a request, an
+   acceptance that is out of date. */
+.ui-tag.is-unsettled { border-style: dashed; }
+.ui-tag.is-problem {
+  border-color: var(--stage-conflict-fill);
+  color: var(--stage-conflict-text);
 }
 .ui-entity-badge[data-entity-kind="person"] { padding-left: 2px; }
 .ui-entity-badge[data-entity-kind="team"] {
@@ -272,6 +317,12 @@ button.danger {
 .ui-entity-badge[data-status="revoked"],
 .ui-entity-badge[data-status="expired"],
 .ui-entity-badge[data-status="outdated"] { opacity: 0.68; }
+/* Out of date is a thing to do something about, not a thing drawn faintly.
+   Opacity alone read as a styling accident - the same badge, dimmer - so it
+   takes the dashed edge every other unsettled state has. The tooltip names
+   it; this is what makes you look. */
+.ui-entity-badge[data-status="outdated"],
+.ui-entity-badge[data-status="expired"] { border-style: dashed; }
 .ui-entity-badge.is-compact {
   min-width: 26px;
   min-height: 26px;
