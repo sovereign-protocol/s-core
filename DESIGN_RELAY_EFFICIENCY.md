@@ -11,9 +11,12 @@ here is reproduced by a test in `tests/test_relay_efficiency.py`.
 **All seven steps have landed.** An idle cycle went from `2 + 4 × topics`
 logical relay operations to `2 + topics` — 14 to 5 at three topics — and an
 acknowledgement from four operations rewriting the whole subtree to one head
-write. The sections below are kept as they were argued, each with what it
-actually cost and what it turned up; step 7 records why the mechanism it
-specified was dropped in favour of one that was already there.
+write. On the link this was written from, that is 17 SFTP operations per quiet
+cycle down to 6, and 56 % of wall clock inside SFTP down to about a fifth
+(*Measured afterwards*, under Sequencing). The sections below are kept as they
+were argued, each with what it actually cost and what it turned up; step 7
+records why the mechanism it specified was dropped in favour of one that was
+already there.
 
 ## What the session cost
 
@@ -290,7 +293,8 @@ longer `expectedFailure`); `test_one_change_costs_one_subtree_write_and_one_ackn
 — the author writes its subtree once and the peer answers with a head and
 nothing else; `test_a_peer_arriving_after_an_acknowledgement_still_gets_the_topic`
 — the head an acknowledgement leaves behind still names a snapshot that is
-there.
+there. Confirmed live: no `relay.publication_snapshot_race` in a traced restart,
+where two had fired before this step (see *Measured afterwards*).
 
 ## Step 7 — The last head read — **done, by other means**
 
@@ -359,6 +363,39 @@ is the point at which a cost plan should stop.
 
 The write side is bounded too: one subtree write per change by its author, and a
 head and nothing more from everyone acknowledging it.
+
+### Measured afterwards, on the link it was written from
+
+Same two clients, same SFTP relay, traced at `timing` for five minutes on
+2026-08-17 after all seven had landed.
+
+| A8501, quiet cycle | before | after |
+|---|---|---|
+| SFTP operations | 17 | **6** |
+| cycle duration (p50) | 1467 ms | **608 ms** |
+| `publish_after_poll` | 386 ms | **26 ms** |
+| operations per cycle (mean) | 16.5 | **6.3** |
+
+A peer's head was read **8 times in 105 cycles**, against once per peer per
+topic per cycle before. Of nine publications, six were acknowledgements costing
+two operations rather than four; only three `_gc_snapshots` appear in the whole
+trace, which is the count of publications that actually carried content.
+
+Both predictions the plan made about failure held. **No
+`relay.publication_snapshot_race`** — including through both clients' cold
+start, which is exactly where it fired twice before step 6, and which is the
+live proof that section asked for. **No `relay.sftp_reconnect`** either, and
+that is now a statement rather than an absence of evidence: step 1 is what makes
+the difference between a link that did not fault and a client that could not say.
+
+Propagation is unchanged, which was the constraint on all of this: a card moved
+on B was published in 1.08 s and seen by A in 2.95 s, inside one poll interval.
+
+Two things in the trace that are not regressions. The first cycle after start-up
+takes about nine seconds on both clients - a cold connect and a first read of
+everything - after which no cycle exceeds 1.5 s. And a slow `_list_dir` at
+1.5 s or a `_read_json` at 1.85 s is a slow answer, not a dropped connection;
+telling those two apart is the whole point of step 1.
 
 ### What step 3 cost elsewhere
 
