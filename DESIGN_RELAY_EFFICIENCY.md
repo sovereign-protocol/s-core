@@ -201,12 +201,34 @@ Seven of A's sixteen board publications carried no content change
 pays the whole `write_snapshot` path: read head, write the entire subtree, write
 head, gc listing (`relay_storage.py:402`) — four operations where two would do.
 
+**And the cost is the smaller half of it.** Rewriting the subtree makes a
+snapshot file *mutable under a fixed hash*, and that is the only thing that
+makes `relay.publication_snapshot_race` reachable at all. The session run after
+steps 1-3 landed caught it twice, on B's first cycle after a restart:
+
+```
+A  05:48:44.844  publication_published  board  seq 27  ack_requested=False  hash 4f89d90282
+B  05:48:44.905  publication_snapshot_race     head_seq 26  snapshot_seq 27  hash 4f89d90282
+```
+
+B read the head at generation 26, A's acknowledgement rewrote the *same-hash*
+snapshot 61 ms later, and B's snapshot read landed on generation 27. The team
+topic repeated it 20 ms apart in the same cycle. Nothing was lost - the guard
+skipped, and the next cycle cached both (`seq 27` at 05:48:46.954, `seq 34` at
+05:48:47.491, about two seconds) - but a client that has just started is
+precisely the one doing the most fetching, and it is the one that meets this.
+
+A content-addressed file should never change. Once the head can advance without
+the snapshot, `snapshots/<hash>.json` is immutable by construction and this race
+cannot arise from an acknowledgement at all. That is the real argument for this
+step; the four saved operations are a bonus.
+
 The obstacle is that the head's metadata is smuggled through the snapshot
 payload. `_relay_observed`, `_relay_observed_publications`,
 `_relay_ack_publication_seq` and `_relay_ack_requested` are written into every
 snapshot **solely so `write_snapshot` can copy them into `head.json`**
 (`relay_storage.py:408-425`). The only field ever read back out of a downloaded
-snapshot is `_relay_publication_seq`, at `relay_logic.py:1729`.
+snapshot is `_relay_publication_seq`, at `relay_logic.py:1810`.
 
 **Change, in two parts.**
 
@@ -217,16 +239,20 @@ snapshot is `_relay_publication_seq`, at `relay_logic.py:1729`.
    unchanged, and route observation-only publications to it.
 
 **One trap to close with it.** The snapshot-race check at
-`relay_logic.py:1731` refuses a payload whose `_relay_publication_seq` differs
+`relay_logic.py:1814` refuses a payload whose `_relay_publication_seq` differs
 from the head's. Once a head can advance without its snapshot, a first-time
-reader would meet head seq 16 against snapshot seq 15 and skip the topic
-indefinitely. The check must become `payload_seq > publication_seq`: a snapshot
-from a *newer* generation is the real race, while an older one carrying the
-head's hash is content-identical by definition. Do not land part 2 without this.
+reader would meet head seq 27 against snapshot seq 26 and skip the topic
+indefinitely - trading a two-second stall for a permanent one. The check must
+become `payload_seq > publication_seq`: a snapshot from a *newer* generation is
+the real race, while an older one carrying the head's hash is content-identical
+by definition. Do not land part 2 without this.
 
-**Acceptance.** `test_an_acknowledgement_does_not_rewrite_the_subtree`, plus a
-regression test that a peer arriving after an observation-only publication still
-receives the topic.
+**Acceptance.** `test_an_acknowledgement_does_not_rewrite_the_subtree` (already
+written, currently `expectedFailure`), plus two regression tests this step's own
+change makes necessary: a peer arriving after an observation-only publication
+still receives the topic, and a snapshot older than its head is accepted rather
+than raced. Live proof that it worked would be a restart under load with no
+`relay.publication_snapshot_race` in the trace.
 
 ## Step 7 — Presence as a manifest
 
