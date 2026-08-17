@@ -789,10 +789,12 @@ class AppServerTests(unittest.TestCase):
             relay = RelayLogic(session, {})
             relay.calibrate_timing_if_due = lambda: None
             relay.write_presence = lambda: None
-            relay.poll_and_apply = lambda _after_apply=None: [
+            # A cycle hands its peer listing from the poll to the publication,
+            # so both stubs take it even though neither looks at it.
+            relay.poll_and_apply = lambda _after_apply=None, _listings=None: [
                 ("topic-1", "peer-b"),
             ]
-            relay.publish_due_topics = lambda: ["topic-1"]
+            relay.publish_due_topics = lambda _listings=None: ["topic-1"]
 
             result = relay.poll_once(lambda: None)
             records = [

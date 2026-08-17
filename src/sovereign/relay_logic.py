@@ -201,16 +201,16 @@ class RelayLogic:
         # this client's own publication identity. Never carry that stale
         # address-to-person relationship into the new role.
         self.session.forget_peer_address(f"relay:{self.identity}")
-        self.storage: RelayStorage | None = self._build_storage(config)
+        self.storage: RelayStorage | None = None
+        self._set_storage(self._build_storage(config))
         adopted_descriptor = None
         if self.storage is None:
             adopted_descriptor = self.session.component_metadata("relay").get(
                 "relay_adopted_storage_descriptor",
             )
-            self.storage = self._storage_from_descriptor(
-                adopted_descriptor, config,
+            self._set_storage(
+                self._storage_from_descriptor(adopted_descriptor, config),
             )
-        self._report_transport_events()
         self.timing = RelayTiming(
             getattr(self.storage, "mtime_resolution_seconds", 1.0),
         )
@@ -328,6 +328,22 @@ class RelayLogic:
         root = config.get("relay_root")
         return LocalFolderRelayStorage(root) if root else None
 
+    def _set_storage(self, storage: RelayStorage | None) -> None:
+        """The one place this connection's storage is assigned.
+
+        Every backend swap has to leave transport reporting wired, and there
+        is no way to guarantee that from three separate assignments: adopting
+        a descriptor and re-ensuring an existing target both installed a fresh
+        backend whose on_event was None, and a client that took either path
+        went silent for the rest of its life - not only for timing, but for
+        relay.sftp_reconnect, which is the always-on record of a dropped
+        connection. Observed live: one of two clients stopped reporting at
+        22:08:17 and polled normally for another 203 cycles with nothing to
+        show for it. Assign through here, or the next swap loses it again.
+        """
+        self.storage = storage
+        self._report_transport_events()
+
     def _report_transport_events(self) -> None:
         """Let the storage backend trace link faults it silently absorbs."""
         if hasattr(self.storage, "on_event"):
@@ -411,7 +427,7 @@ class RelayLogic:
         return True
 
     def _install_adopted_storage(self, storage, descriptor: dict | None = None) -> None:
-        self.storage = storage
+        self._set_storage(storage)
         self.timing = RelayTiming(
             getattr(self.storage, "mtime_resolution_seconds", 1.0),
         )
@@ -783,6 +799,12 @@ class RelayLogic:
         published_before = []
         published_after = []
         applied = []
+        # Which peers the relay listed per topic, for this cycle only. A local
+        # for the same reason it is not a field: publish_once and a UI request
+        # can run their own publication concurrently with this cycle, and they
+        # must ask the relay themselves rather than inherit an answer from
+        # whatever cycle happened to be in flight.
+        peer_listings: dict[str, list[str]] = {}
         try:
             phase("calibrate_timing", self.calibrate_timing_if_due)
             work_started = time.monotonic()
@@ -794,10 +816,11 @@ class RelayLogic:
             # reader can observe the cached divergence between those steps.
             applied = phase(
                 "poll_and_apply",
-                lambda: self.poll_and_apply(after_apply),
+                lambda: self.poll_and_apply(after_apply, peer_listings),
             )
             published_before = phase(
-                "publish_after_poll", self.publish_due_topics,
+                "publish_after_poll",
+                lambda: self.publish_due_topics(peer_listings),
             )
             work_duration = time.monotonic() - work_started
             self.record_cycle_duration(work_duration)
@@ -1208,7 +1231,9 @@ class RelayLogic:
             changed=bool(getattr(result, "value", False)),
         )
 
-    def _relay_holds_our_publication(self, topic_uuid: str) -> bool:
+    def _relay_holds_our_publication(
+        self, topic_uuid: str, peer_listings: dict[str, list[str]] | None = None,
+    ) -> bool:
         """Does the relay still list a publication of ours for this topic?
 
         `published` records "I already wrote state X for this topic", and
@@ -1221,17 +1246,25 @@ class RelayLogic:
         alive - presence heartbeats are unconditional - while carrying no
         content at all, and a peer arriving later syncs nothing.
 
-        So the relay is asked. This is only reached on the path that would
-        otherwise skip, and it costs one directory listing per published
-        topic per tick; being wrong here is silent and open-ended, which is
-        worth more than the listing.
+        So the relay is asked - but asked once. A poll cycle already listed
+        every topic's peers on its way in (poll_and_apply), and re-listing the
+        same directory a few hundred milliseconds later re-reads something
+        nothing has written to in between: measured at three of seventeen
+        operations per cycle, a fifth of the cycle, for an answer already in
+        hand. `peer_listings` carries that answer across the cycle. A topic
+        the poll did not visit, or a publication outside a cycle, still asks
+        the relay directly - the guarantee is the relay's word, not a local
+        flag, and that is unchanged.
 
         A listing failure answers True: an unreachable relay is not evidence
         that our publication is gone, and republishing the world on every
         transient error is its own harm.
         """
+        listed = (peer_listings or {}).get(topic_uuid)
         try:
-            present = self.identity in set(self.storage.list_peers(topic_uuid))
+            if listed is None:
+                listed = self.storage.list_peers(topic_uuid)
+            present = self.identity in set(listed)
         except Exception as error:  # noqa: BLE001 - see docstring
             self.session.trace_event(
                 "relay.publication_presence_unknown",
@@ -1252,7 +1285,9 @@ class RelayLogic:
         return present
 
     @_relay_io_locked
-    def publish_due_topics(self) -> list[str]:
+    def publish_due_topics(
+        self, peer_listings: dict[str, list[str]] | None = None,
+    ) -> list[str]:
         if not self.storage:
             return []
         published = []
@@ -1279,7 +1314,9 @@ class RelayLogic:
             if (self._state["published"].get(topic_uuid) == current_hash
                     and self._state["published_observations"].get(topic_uuid)
                     == observed_digest
-                    and self._relay_holds_our_publication(topic_uuid)):
+                    and self._relay_holds_our_publication(
+                        topic_uuid, peer_listings,
+                    )):
                 continue
             # Re-read hash and subtree together so the snapshot we write is
             # the one current_hash actually names (a concurrent apply between
@@ -1475,7 +1512,10 @@ class RelayLogic:
         }
 
     @_relay_io_locked
-    def poll_and_apply(self, after_apply=None) -> list[tuple[str, str]]:
+    def poll_and_apply(
+        self, after_apply=None,
+        peer_listings: dict[str, list[str]] | None = None,
+    ) -> list[tuple[str, str]]:
         # Discovers topics from what's actually in the relay, not from
         # relay_topic_uuids() (this session's own local topics) - otherwise
         # a peer who's never seen a topic before could never learn about it
@@ -1523,6 +1563,11 @@ class RelayLogic:
             )
         for topic_uuid in topic_uuids:
             listed_peer_ids = self.storage.list_peers(topic_uuid)
+            if peer_listings is not None:
+                # Publication reuses this rather than listing again a few
+                # hundred milliseconds later - see
+                # _relay_holds_our_publication.
+                peer_listings[topic_uuid] = listed_peer_ids
             self._forget_departed_relay_peers(topic_uuid, listed_peer_ids)
             for peer_id in listed_peer_ids:
                 if peer_id == self.identity:
@@ -1686,6 +1731,7 @@ class RelayLogic:
                     cached_topic = self.session.get_cached_peer_subtree(
                         peer_addr, topic_uuid,
                     )
+                    local_state_hash = self.session.node_state_hash(topic_uuid)
                     wants_graft = (
                         topic_uuid in self._state.get("desired", [])
                         and self.session.protocol.index.get(topic_uuid) is None
@@ -1722,30 +1768,65 @@ class RelayLogic:
                         bookkeeping_changed = True
                         applied.add((topic_uuid, peer_id))
                     continue
-                payload = self.storage.read_snapshot(topic_uuid, peer_id, state_hash)
-                if not payload:
-                    continue
-                payload_publication_seq = payload.get(
-                    "_relay_publication_seq", 0,
+                # A state hash is content identity, so a head naming the hash
+                # this client already holds names content this client already
+                # has. Fetching it downloads our own state back from the
+                # relay - which is what most inbound traffic actually was:
+                # eleven of twelve snapshot reads in a traced two-client
+                # session, one per side per change, because adopting a peer's
+                # edit makes the adopter's hash equal the author's and the
+                # adopter republishes it.
+                #
+                # Only when the peer is already cached, because the envelope
+                # also says where the peer keeps this topic, and our own copy
+                # can only answer that for a peer whose mount point we have
+                # already seen. First contact still fetches.
+                local_copy = (
+                    cached_topic is not None
+                    and not wants_graft
+                    and state_hash == local_state_hash
                 )
-                if (
-                    publication_seq > 0
-                    and payload_publication_seq != publication_seq
-                ):
-                    # The publisher advanced an unchanged-hash snapshot
-                    # between our head and snapshot reads. Do not combine
-                    # metadata from two generations; the fixed poll cadence
-                    # will fetch the new head promptly.
+                if local_copy:
+                    with self._session_lock:
+                        payload = self.session.get_subtree(topic_uuid)
+                    if not payload:
+                        continue
+                    payload["parent_uuid"] = cached_topic.parent_uuid
                     self.session.trace_event(
-                        "relay.publication_snapshot_race",
+                        "relay.publication_matched_local_state",
                         relay_identity=self.identity,
                         topic_uuid=topic_uuid,
                         peer_id=peer_id,
-                        head_publication_seq=publication_seq,
-                        snapshot_publication_seq=payload_publication_seq,
+                        publication_seq=publication_seq,
                         state_hash=state_hash,
                     )
-                    continue
+                else:
+                    payload = self.storage.read_snapshot(
+                        topic_uuid, peer_id, state_hash,
+                    )
+                    if not payload:
+                        continue
+                    payload_publication_seq = payload.get(
+                        "_relay_publication_seq", 0,
+                    )
+                    if (
+                        publication_seq > 0
+                        and payload_publication_seq != publication_seq
+                    ):
+                        # The publisher advanced an unchanged-hash snapshot
+                        # between our head and snapshot reads. Do not combine
+                        # metadata from two generations; the fixed poll cadence
+                        # will fetch the new head promptly.
+                        self.session.trace_event(
+                            "relay.publication_snapshot_race",
+                            relay_identity=self.identity,
+                            topic_uuid=topic_uuid,
+                            peer_id=peer_id,
+                            head_publication_seq=publication_seq,
+                            snapshot_publication_seq=payload_publication_seq,
+                            state_hash=state_hash,
+                        )
+                        continue
                 subtree = protocol_node_from_envelope(payload)
                 peer_copy = copy.deepcopy(subtree)
                 # Registering peer_topic_sets (not add_peer - see
@@ -2213,7 +2294,7 @@ class RelayManager:
             if existing:
                 with existing._io_lock:
                     previous_storage = existing.storage
-                    existing.storage = storage
+                    existing._set_storage(storage)
                     if previous_storage and previous_storage is not storage:
                         previous_storage.close()
                 existing.adopt_poll_interval_from_descriptor(descriptor or {})
@@ -2632,7 +2713,7 @@ class RelayManager:
             storage = connection.storage
             if storage:
                 storage.close()
-            connection.storage = None
+            connection._set_storage(None)
             connection._scoped_topic_uuids = set()
         if fingerprint:
             self.connections.pop(fingerprint, None)

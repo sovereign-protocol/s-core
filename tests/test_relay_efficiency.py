@@ -1,0 +1,431 @@
+"""A poll cycle must not pay twice for the same answer.
+
+Sync correctness is covered elsewhere. What is guarded here is cost: how many
+relay operations one cycle issues, and whether each of them asks something the
+client does not already know. That distinction only becomes visible when it is
+counted, because every redundant read still returns the right answer - the
+session that motivated this file ran 423 cycles with no error of any kind while
+spending 56% of its wall clock inside SFTP, roughly half of it re-reading
+directories and re-downloading its own state.
+
+Operations are counted at the RelayStorage boundary, not at the transport, so a
+budget here means the same thing on a local folder, over SFTP, or over anything
+added later. One logical operation is several SFTP round trips (a read is three,
+a write four or five), which is why a small number in this file is a large
+number of milliseconds on a real link.
+
+Tests marked expectedFailure encode a step of DESIGN_RELAY_EFFICIENCY.md that
+has not landed. unittest reports an unexpected success as a failure, so each one
+announces itself the moment its fix arrives and the marker must be removed then.
+"""
+
+import tempfile
+import unittest
+from collections import Counter
+from pathlib import Path
+
+from sovereign.protocol import ProtocolNode
+from sovereign.relay_logic import RelayLogic, RelayManager
+from sovereign.session import Session
+from sovereign.topic_registry import ApplicationRegistration
+
+
+# Every method of the RelayStorage contract that costs a visit to the relay.
+# Listed rather than inferred, so a method added to the contract has to be
+# classified deliberately instead of silently escaping the budget.
+RELAY_OPERATIONS = frozenset({
+    "write_snapshot", "read_head", "read_head_with_mtime", "read_snapshot",
+    "list_peers", "list_topics", "delete_publication", "delete_topic",
+    "write_presence", "read_presence_with_mtime", "timing_probe",
+    "verify_access", "write_blob", "read_blob", "has_blob", "list_blob_ids",
+    "write_blob_lease", "delete_blob_lease", "list_blob_leases",
+})
+
+# An idle cycle over an unchanged relay, per peer, as measured today:
+#   1  write_presence          the heartbeat, unconditional by design
+#   1  read_presence_with_mtime the peer's heartbeat, cached across topics
+# and per topic:
+#   1  list_peers              once per cycle, reused by publication
+#   1  read_head               our own slot, for the sibling rule
+#   1  read_head_with_mtime    the peer's head
+# Step 5 of DESIGN_RELAY_EFFICIENCY.md removes the head read on a topic whose
+# peer directory has not been written to, taking the per-topic charge to 2.
+IDLE_FIXED_OPERATIONS = 2
+IDLE_OPERATIONS_PER_TOPIC = 3
+
+
+class _CountingStorage:
+    """Delegates to a real backend and records what was asked of it."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = Counter()
+        self.listed_topics: list[str] = []
+        self.written_snapshots: list[str] = []
+        self.mtime_resolution_seconds = inner.mtime_resolution_seconds
+
+    def __getattr__(self, name):
+        attribute = getattr(self._inner, name)
+        if name not in RELAY_OPERATIONS:
+            return attribute
+
+        def recorded(*args, **kwargs):
+            self.calls[name] += 1
+            if name == "list_peers":
+                self.listed_topics.append(args[0])
+            if name == "write_snapshot":
+                self.written_snapshots.append(args[2])
+            return attribute(*args, **kwargs)
+
+        return recorded
+
+    @property
+    def total(self) -> int:
+        return sum(self.calls.values())
+
+    def reset(self) -> None:
+        self.calls.clear()
+        self.listed_topics.clear()
+        self.written_snapshots.clear()
+
+
+def register_notes_app(session: Session, topics: list | None = None) -> list:
+    """A topic type without an application - same shape as the relay tests."""
+    topics = [] if topics is None else topics
+    session.register_application(ApplicationRegistration(
+        application_id="notes",
+        root_types=frozenset({"notes"}),
+        list_topics=lambda: list(topics),
+        accept_invitation=session.accept_topic_invitation,
+        assignment_scoped=True,
+        mount_invitation=True,
+    ))
+    return topics
+
+
+class RelayEfficiencyCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.relay_root, self.state_dir = self.new_relay_location()
+
+    def new_relay_location(self) -> tuple[str, str]:
+        """An empty relay and a private place for its bookkeeping.
+
+        Bookkeeping goes in the temp directory deliberately: the default state
+        path is derived from the working directory (relay_logic.py:130), so a
+        test that does not pin it leaves a file in the repository - which is
+        how several hundred of them accumulated.
+        """
+        relay_root = tempfile.TemporaryDirectory()
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(relay_root.cleanup)
+        self.addCleanup(state_dir.cleanup)
+        return relay_root.name, state_dir.name
+
+    def connect(self, session: Session, identity: str,
+                location: tuple[str, str] | None = None) -> RelayLogic:
+        relay_root, state_dir = location or (self.relay_root, self.state_dir)
+        relay = RelayLogic(session, {
+            "relay_root": relay_root,
+            "relay_identity": identity,
+            "relay_state_file": str(Path(state_dir) / f"{identity}.json"),
+        })
+        relay.storage = _CountingStorage(relay.storage)
+        return relay
+
+    def publisher(
+        self, topic_count: int, location: tuple[str, str] | None = None,
+    ) -> tuple[Session, RelayLogic, list[ProtocolNode]]:
+        session = Session("addr-a")
+        topics = register_notes_app(session)
+        made = [
+            session.create_child(
+                session.root_uuid(), {"type": "notes", "name": f"topic-{index}"}, {},
+            ).value
+            for index in range(topic_count)
+        ]
+        topics.extend(made)
+        relay = self.connect(session, "A", location)
+        relay.set_scoped_topics({node.uuid for node in made})
+        relay.publish_due_topics()
+        return session, relay, made
+
+    def subscriber(
+        self, topic_uuids, location: tuple[str, str] | None = None,
+    ) -> tuple[Session, RelayLogic]:
+        """A peer that has taken the topics and publishes its own copy back."""
+        session = Session("addr-b")
+        topics = register_notes_app(session)
+        relay = self.connect(session, "B", location)
+        relay.set_scoped_topics(set(topic_uuids))
+        relay.mark_topics_desired(sorted(topic_uuids))
+        relay.poll_and_apply()
+        topics.extend(
+            session.protocol.index.get(uuid) for uuid in sorted(topic_uuids)
+        )
+        relay.publish_due_topics()
+        return session, relay
+
+    def settle(self, *relays: RelayLogic, cycles: int = 4) -> None:
+        """Run both sides until convergence, then start counting from zero."""
+        for _ in range(cycles):
+            for relay in relays:
+                relay.poll_once()
+        for relay in relays:
+            relay.storage.reset()
+
+
+class TransportReportingSurvivesAStorageSwapTests(RelayEfficiencyCase):
+    """Step 1. A swapped storage that reports nothing hides its own faults.
+
+    relay.sftp_reconnect travels through the same callback as the timing
+    events and is always on, so a client whose storage was replaced stops
+    reporting dropped connections entirely - silently, and for the rest of the
+    process's life. Observed live: one of two clients went dark at 22:08:17
+    while continuing to poll normally for another 203 cycles.
+    """
+
+    DESCRIPTOR = {
+        "type": "sftp", "host": "relay.example", "port": 22,
+        "username": "user", "root": "/srv/relay",
+    }
+
+    def sftp_config(self, identity: str) -> dict:
+        return {
+            "relay_backend": "sftp",
+            "relay_sftp_host": "relay.example",
+            "relay_sftp_username": "user",
+            "relay_sftp_root": "/srv/relay",
+            "relay_identity": identity,
+            "relay_state_file": str(Path(self.state_dir) / f"{identity}.json"),
+        }
+
+    def test_a_connection_built_at_boot_reports_transport_events(self):
+        relay = RelayLogic(Session("addr-a"), self.sftp_config("A"))
+        self.assertIsNotNone(relay.storage.on_event)
+
+    def test_re_ensuring_a_connection_keeps_transport_reporting(self):
+        # ensure_connection's existing-connection branch assigns a freshly
+        # built storage over the wired one. Every accepted token, edited
+        # target and startup registry bootstrap takes this path.
+        manager = RelayManager(Session("addr-a"), self.sftp_config("A"))
+        connection = manager.ensure_connection(self.DESCRIPTOR)
+        self.assertIsNotNone(connection.storage.on_event)
+
+    def test_adopting_a_descriptor_wires_transport_reporting(self):
+        # A client that rode in on a token builds its backend here and
+        # nowhere else, so this is its only chance to be wired at all.
+        relay = RelayLogic(Session("addr-b"), {
+            "relay_identity": "B",
+            "relay_state_file": str(Path(self.state_dir) / "B.json"),
+        })
+        self.assertIsNone(relay.storage)
+        self.assertTrue(relay.adopt_storage_from_descriptor(self.DESCRIPTOR))
+        self.assertIsNotNone(relay.storage.on_event)
+
+
+class IdlePollCycleCostTests(RelayEfficiencyCase):
+    """What one cycle costs when there is nothing to say and nothing to hear.
+
+    This is the number that decides how many topics a client can carry: at a
+    22ms round trip and three to four round trips per operation, a 3s poll
+    interval affords roughly forty operations before the cycle stops fitting
+    inside it.
+    """
+
+    def test_an_idle_cycle_costs_a_fixed_amount_plus_a_charge_per_topic(self):
+        session, relay_a, made = self.publisher(3)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b)
+
+        relay_a.poll_once()
+
+        self.assertEqual(
+            relay_a.storage.total,
+            IDLE_FIXED_OPERATIONS + IDLE_OPERATIONS_PER_TOPIC * 3,
+        )
+        self.assertEqual(dict(relay_a.storage.calls), {
+            "write_presence": 1,
+            "read_presence_with_mtime": 1,
+            "list_peers": 3,
+            "read_head": 3,
+            "read_head_with_mtime": 3,
+        })
+
+    def test_an_idle_cycle_moves_no_content(self):
+        session, relay_a, made = self.publisher(2)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b)
+
+        relay_a.poll_once()
+
+        self.assertEqual(relay_a.storage.calls["write_snapshot"], 0)
+        self.assertEqual(relay_a.storage.calls["read_snapshot"], 0)
+
+    def test_cost_grows_linearly_with_topic_count(self):
+        # A budget that is merely "small today" is not a budget. What has to
+        # hold is the shape: an index or a manifest changes the slope, a
+        # careless nested read changes the exponent.
+        for topic_count in (1, 2, 4):
+            with self.subTest(topics=topic_count):
+                location = self.new_relay_location()
+                _, relay_a, made = self.publisher(topic_count, location)
+                _, relay_b = self.subscriber(
+                    {node.uuid for node in made}, location,
+                )
+                self.settle(relay_a, relay_b)
+
+                relay_a.poll_once()
+
+                self.assertEqual(
+                    relay_a.storage.total,
+                    IDLE_FIXED_OPERATIONS
+                    + IDLE_OPERATIONS_PER_TOPIC * topic_count,
+                )
+
+    def test_a_topic_is_listed_once_per_cycle(self):
+        # poll_and_apply lists topics/<t>/peers and publication reuses that
+        # listing rather than re-reading a directory nothing has written to in
+        # the meantime. Three topics, three listings saved, ~280ms - a fifth
+        # of the cycle.
+        _, relay_a, made = self.publisher(3)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b)
+
+        relay_a.poll_once()
+
+        listed = Counter(relay_a.storage.listed_topics)
+        self.assertEqual(
+            [uuid for uuid, count in listed.items() if count > 1], [],
+        )
+
+
+class NoRedundantContentTransferTests(RelayEfficiencyCase):
+    """Bytes that cross the relay must be bytes the receiver does not hold."""
+
+    def test_a_peer_head_matching_our_own_state_costs_no_snapshot_read(self):
+        # When a peer adopts our change, its content hash becomes our hash and
+        # it republishes. A state hash is content identity, so there is nothing
+        # left to fetch. Eleven of twelve snapshot reads in the traced session
+        # were this.
+        session_a, relay_a, made = self.publisher(1)
+        topic = made[0]
+        session_b, relay_b = self.subscriber({topic.uuid})
+
+        self.assertEqual(
+            session_a.node_state_hash(topic.uuid),
+            session_b.node_state_hash(topic.uuid),
+            "the scenario is only meaningful if both sides agree",
+        )
+        # First contact still fetches: our own copy cannot say where a peer we
+        # have never seen keeps this topic.
+        relay_a.poll_and_apply()
+
+        # The shape that produced the waste: A edits, B takes the edit, and B
+        # republishes content whose hash is now A's own.
+        session_a.modify(topic.uuid, {"type": "notes", "name": "renamed"}, {})
+        relay_a.publish_due_topics()
+        relay_b.poll_and_apply()
+        session_b.accept_peer_node("relay:A", topic.uuid, topic_uuid=topic.uuid)
+        relay_b.publish_due_topics()
+        self.assertEqual(
+            session_b.node_state_hash(topic.uuid),
+            session_a.node_state_hash(topic.uuid),
+        )
+
+        relay_a.storage.reset()
+        applied = relay_a.poll_and_apply()
+
+        self.assertEqual(relay_a.storage.calls["read_snapshot"], 0)
+        self.assertIn((topic.uuid, "B"), applied)
+        self.assertEqual(
+            session_a.get_cached_peer_subtree("relay:B", topic.uuid).state_hash,
+            session_a.node_state_hash(topic.uuid),
+            "the peer cache must hold what a fetch would have produced",
+        )
+
+    @unittest.expectedFailure
+    def test_an_acknowledgement_does_not_rewrite_the_subtree(self):
+        # Step 6. An observation-only publication carries no content change,
+        # but publish_due_topics has only one way to write - the full
+        # write_snapshot path - so it rewrites the entire subtree to move a
+        # sequence number. Seven of sixteen board publications in the traced
+        # session were this.
+        _, relay_a, made = self.publisher(1)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+
+        for _ in range(4):
+            relay_a.poll_once()
+            relay_b.poll_once()
+
+        rewritten = [
+            state_hash
+            for state_hash, count in Counter(relay_a.storage.written_snapshots).items()
+            if count > 1
+        ]
+        self.assertEqual(rewritten, [])
+
+    def test_convergence_settles_instead_of_acknowledging_forever(self):
+        # The acknowledgement protocol's own termination: ack_requested is
+        # false for observation-only heads (relay_logic.py:1322), so the pair
+        # goes quiet rather than trading acks of acks. This is the invariant
+        # the step 6 rework must not break.
+        session_a, relay_a, made = self.publisher(1)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b, cycles=6)
+
+        session_a.modify(made[0].uuid, {"type": "notes", "name": "renamed"}, {})
+        relay_a.publish_once()
+        for _ in range(6):
+            relay_b.poll_once()
+            relay_a.poll_once()
+
+        self.assertEqual(relay_a.storage.calls["write_snapshot"], 1)
+        self.assertEqual(relay_b.storage.calls["write_snapshot"], 1)
+
+        relay_a.storage.reset()
+        relay_b.storage.reset()
+        for _ in range(3):
+            relay_a.poll_once()
+            relay_b.poll_once()
+        self.assertEqual(relay_a.storage.calls["write_snapshot"], 0)
+        self.assertEqual(relay_b.storage.calls["write_snapshot"], 0)
+
+
+class LocalWorkLeavesWithoutPayingForInboundSyncTests(RelayEfficiencyCase):
+    """An edit must not wait behind a full inbound poll to get out.
+
+    publish_once exists for this (relay_logic.py:890): a cycle publishes last,
+    so routing an edit through one put a floor of about 1.5s on every change,
+    most of it inbound work the edit does not depend on. In the traced session
+    each card move left the machine in 0.69-1.00s.
+    """
+
+    def test_publishing_reads_only_our_own_slot(self):
+        session, relay_a, made = self.publisher(1)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b)
+
+        session.modify(made[0].uuid, {"type": "notes", "name": "renamed"}, {})
+        relay_a.publish_once()
+
+        self.assertEqual(dict(relay_a.storage.calls), {
+            # The sibling rule, which is the whole reason this path may skip
+            # the inbound poll at all - it must not be optimised away.
+            "read_head": 1,
+            "write_snapshot": 1,
+        })
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 0)
+        self.assertEqual(relay_a.storage.calls["read_snapshot"], 0)
+
+    def test_an_unchanged_topic_publishes_nothing(self):
+        session, relay_a, made = self.publisher(2)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        self.settle(relay_a, relay_b)
+
+        relay_a.publish_once()
+
+        self.assertEqual(relay_a.storage.calls["write_snapshot"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
