@@ -161,38 +161,64 @@ will have to go.
 green: the echo round trip costs zero snapshot reads and both sides still
 converge. One test in `s-initiative` had to change with it — see below.
 
-## Step 4 — One round trip per file read
+## Step 4 — One round trip per file read — **done**
 
-`read_head_with_mtime` and `read_presence_with_mtime` each issue a `_read_json`
-followed by a separate `_stat_mtime` (`relay_storage.py:601`, `:672`). Paramiko
-returns both from one visit: `sftp.open(...)` then `SFTPFile.stat()` on the open
-handle. This is the same saving `write_presence` already documents and takes at
-`relay_storage.py:648` — "one round trip fewer than write-then-stat" — applied
-to the read side.
+`read_head_with_mtime` and `read_presence_with_mtime` each issued a `_read_json`
+followed by a separate `_stat_mtime`. Paramiko returns both from one visit:
+`sftp.open(...)` then `SFTPFile.stat()` on the open handle. This is the same
+saving `write_presence` already documents and takes — "one round trip fewer than
+write-then-stat" — applied to the read side.
 
-Cheap on its own (~65 ms per cycle at three topics) and it is a precondition for
-step 5, which needs the mtime to be free.
+Both backends now have `_read_json_with_mtime`, and the two callers go through
+it. Beyond the round trip, it is the only way the pair is coherent: a separate
+stat can describe a version the read did not see, and this mtime decides both
+how stale a peer's perspective looks and — after step 5 — whether its head is
+read again at all.
 
-**Acceptance.** SFTP-level, so not covered by the logical-operation budget:
-assert against a fake paramiko SFTP client that one `read_head_with_mtime`
-issues one `open` and no `stat`.
+**Acceptance.** `OneVisitPerFileTests`, against a recording SFTP client: a head
+read and a heartbeat read each issue one `open` and one `fstat` on the handle,
+no path `stat`; a missing file answers without a second lookup.
 
-## Step 5 — Skip heads that cannot have changed
+## Step 5 — Skip heads that cannot have changed — **done**
 
-`_list_dir` calls `listdir_attr` and throws away everything except the directory
-names (`relay_storage.py:867`). It already has each peer directory's
-`st_mtime` in hand, and a `posix_rename` of `head.json` into that directory
-bumps it. **The information needed to skip an unchanged head read is already
-being downloaded and discarded.**
+`_list_dir` called `listdir_attr` and threw away everything except the directory
+names. It already had each peer directory's `st_mtime` in hand, and a
+`posix_rename` of `head.json` into that directory bumps it. **The information
+needed to skip an unchanged head read was already being downloaded and
+discarded.**
 
-**Change.** Return `(name, mtime)` pairs from the peer listing, keep the
-previous cycle's mtimes beside `_relay_listed_peers`, and read a head only when
-its directory mtime has moved. First sight of a peer always reads.
+`list_peers_with_mtimes` keeps it. `poll_and_apply` records, per topic and peer,
+the slot mtime whose head it has taken; an unchanged mtime next cycle means an
+unchanged head, and the head is not read. A peer's head is no longer read on an
+idle cycle at all: **`2 + 2 × topics`, measured — 8 operations at three topics,
+down from 14.**
 
-**Acceptance.** A new budget test: a second idle cycle over an unchanged relay
-costs `2 + 2 × topics` — 8 operations at three topics, down from 14. Correctness
-is guarded by the existing suite plus one test that a head written between
-cycles is still picked up.
+Two things had to be got right, and both are the kind that fail silently.
+
+**The clock's resolution is part of the inference.** SFTP reports mtimes in
+whole seconds (`mtime_resolution_seconds = 1.0`), so a write landing in the same
+second as the one just observed leaves the slot looking untouched — and the
+peer's change would be dropped, and keep being dropped until something else
+wrote into that slot. So a slot may only be settled once its timestamp is
+already older than the resolution, at which point any further write must land in
+a later second and must therefore show. Before the server clock is calibrated,
+nothing settles and every head is read, which is merely the old cost.
+
+**An unchanged slot is not the same as nothing left to do.** A topic that
+arrived before this client could mount it is parked as a pending invitation and
+has to be offered again on the next poll — which is why the unchanged-hash
+short-circuit has always been conditioned on `not wants_graft`. Settling the
+slot bypassed that test one level higher up, and a subteam admitted later never
+appeared; s-team caught it. A slot with a graft still pending is never settled.
+
+Freshness still moves while a slot is quiet: `source_age_seconds` is derived
+from the settled head's mtime, so a silent peer goes stale on schedule without
+being asked again.
+
+**Acceptance.** `SilenceIsOnlyTrustedWhenItIsProofTests` — a head written
+between cycles is still read; a backend whose clock cannot resolve the interval
+never settles anything; a returning peer whose slot reappears is read again; a
+topic waiting to be grafted keeps being offered. Plus the budget test.
 
 ## Step 6 — An acknowledgement should not rewrite a subtree
 
@@ -285,16 +311,24 @@ within one poll interval; existing `test_relay_authority` suite unchanged.
 
 ## Sequencing
 
-Steps 1, 2 and 3 have landed together. 4 precedes 5. 6 precedes 7, because 7
-makes head writes frequent and 6 makes them cheap. 7 is the only step that
-changes the relay's on-disk contract and should land alone.
+Steps 1, 2 and 3 landed together; 4 and 5 landed together, 4 first because 5
+needs the mtime to be free. 6 precedes 7, because 7 makes head writes frequent
+and 6 makes them cheap. 7 is the only step that changes the relay's on-disk
+contract and should land alone.
 
 | step | idle ops (3 topics) | of a 3 s cycle |
 |---|---|---|
 | before | 14 | ~1.35 s |
 | after 2 (**done**) | 11 | ~1.05 s |
-| after 5 | 8 | ~0.75 s |
+| after 5 (**done**) | 8 | ~0.75 s |
 | after 7 | 5 | ~0.45 s |
+
+What remains on an idle cycle is one listing and one own-slot head read per
+topic, plus the two heartbeat operations. The own-slot read is the sibling
+rule's, and the same mtime evidence step 5 uses could retire it — deliberately
+left alone, because that path decides whether publishing would overwrite work a
+person is about to be asked about, and it is not where to be clever for one
+round trip.
 
 ### What step 3 cost elsewhere
 

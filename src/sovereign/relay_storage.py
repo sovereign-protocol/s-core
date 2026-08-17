@@ -31,6 +31,13 @@ Offered API:
     read_head(topic_uuid, peer_id) -> dict | None
     read_snapshot(topic_uuid, peer_id, state_hash) -> dict | None
     list_peers(topic_uuid) -> list[str]
+    list_peers_with_mtimes(topic_uuid) -> list[tuple[str, float | None]]
+      Each peer's slot and when it was last written to, from the one
+      directory listing. A head is renamed into its peer directory, so an
+      unchanged mtime here means an unchanged head - which is how a poll
+      avoids reading every head on every cycle. Whole-second resolution on
+      SFTP, so a caller must not trust an mtime younger than
+      mtime_resolution_seconds (see relay_logic.poll_and_apply).
     list_topics() -> list[str]
     delete_publication(topic_uuid, peer_id) -> None
       Removes only one peer's publication from a topic.
@@ -126,6 +133,9 @@ class RelayStorage(Protocol):
         self, topic_uuid: str, peer_id: str, state_hash: str,
     ) -> dict | None: ...
     def list_peers(self, topic_uuid: str) -> list[str]: ...
+    def list_peers_with_mtimes(
+        self, topic_uuid: str,
+    ) -> list[tuple[str, float | None]]: ...
     def list_topics(self) -> list[str]: ...
     def delete_publication(self, topic_uuid: str, peer_id: str) -> None: ...
     def delete_topic(self, topic_uuid: str) -> None: ...
@@ -271,10 +281,9 @@ class LocalFolderRelayStorage:
     def read_head_with_mtime(
         self, topic_uuid: str, peer_id: str,
     ) -> tuple[dict | None, float | None]:
-        path = self._peer_dir(topic_uuid, peer_id) / "head.json"
-        if not path.is_file():
-            return None, None
-        return self._read_json(path), path.stat().st_mtime
+        return self._read_json_with_mtime(
+            self._peer_dir(topic_uuid, peer_id) / "head.json",
+        )
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
@@ -286,6 +295,15 @@ class LocalFolderRelayStorage:
         if not peers_dir.is_dir():
             return []
         return sorted(entry.name for entry in peers_dir.iterdir() if entry.is_dir())
+
+    def list_peers_with_mtimes(self, topic_uuid: str) -> list[tuple[str, float | None]]:
+        peers_dir = self.root / "topics" / topic_uuid / "peers"
+        if not peers_dir.is_dir():
+            return []
+        return sorted(
+            (entry.name, entry.stat().st_mtime)
+            for entry in peers_dir.iterdir() if entry.is_dir()
+        )
 
     def list_topics(self) -> list[str]:
         topics_dir = self.root / "topics"
@@ -311,10 +329,7 @@ class LocalFolderRelayStorage:
         return path.stat().st_mtime
 
     def read_presence_with_mtime(self, peer_id: str) -> tuple[dict | None, float | None]:
-        path = self._presence_path(peer_id)
-        if not path.is_file():
-            return None, None
-        return self._read_json(path), path.stat().st_mtime
+        return self._read_json_with_mtime(self._presence_path(peer_id))
 
     def timing_probe(self) -> tuple[float | None, float]:
         """Return server mtime plus one metadata-request roundtrip."""
@@ -350,6 +365,20 @@ class LocalFolderRelayStorage:
             return None
         with path.open(encoding="utf-8") as f:
             return json.load(f)
+
+    @staticmethod
+    def _read_json_with_mtime(path: Path) -> tuple[dict | None, float | None]:
+        # Content and timestamp from one open handle, matching the SFTP
+        # backend, where the difference is a whole round trip rather than a
+        # syscall. Taking both from the same visit is also the only way they
+        # are guaranteed to describe the same version of the file.
+        try:
+            with path.open("rb") as f:
+                data = f.read()
+                mtime = os.fstat(f.fileno()).st_mtime
+        except FileNotFoundError:
+            return None, None
+        return json.loads(data.decode("utf-8")), mtime
 
 
 class SftpRelayStorage:
@@ -601,11 +630,9 @@ class SftpRelayStorage:
     def read_head_with_mtime(
         self, topic_uuid: str, peer_id: str,
     ) -> tuple[dict | None, float | None]:
-        path = posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json")
-        content = self._read_json(path)
-        if content is None:
-            return None, None
-        return content, self._stat_mtime(path)
+        return self._read_json_with_mtime(
+            posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json"),
+        )
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
@@ -614,6 +641,11 @@ class SftpRelayStorage:
 
     def list_peers(self, topic_uuid: str) -> list[str]:
         return self._list_dir(posixpath.join(self.root, "topics", topic_uuid, "peers"))
+
+    def list_peers_with_mtimes(self, topic_uuid: str) -> list[tuple[str, float | None]]:
+        return self._list_dir_with_mtimes(
+            posixpath.join(self.root, "topics", topic_uuid, "peers"),
+        )
 
     def list_topics(self) -> list[str]:
         return self._list_dir(posixpath.join(self.root, "topics"))
@@ -670,11 +702,7 @@ class SftpRelayStorage:
         return self._with_retry(operation)
 
     def read_presence_with_mtime(self, peer_id: str) -> tuple[dict | None, float | None]:
-        path = self._presence_path(peer_id)
-        content = self._read_json(path)
-        if content is None:
-            return None, None
-        return content, self._stat_mtime(path)
+        return self._read_json_with_mtime(self._presence_path(peer_id))
 
     def timing_probe(self) -> tuple[float | None, float]:
         """Measure one SFTP request and remove the clock probe afterwards."""
@@ -861,6 +889,46 @@ class SftpRelayStorage:
                     return json.loads(f.read().decode("utf-8"))
             except FileNotFoundError:
                 return None
+
+        return self._with_retry(operation)
+
+    def _read_json_with_mtime(self, path: str) -> tuple[dict | None, float | None]:
+        # One visit, not two. Reading the bytes and then stat-ing the path
+        # cost a whole extra round trip on every head and every heartbeat -
+        # per peer, per topic, per cycle - for a timestamp the open handle
+        # already answers. Same saving write_presence takes on the way out.
+        #
+        # It is also the only correct way to pair them: a separate stat can
+        # observe a version the read did not, and this mtime is what decides
+        # both how stale a peer's perspective is and, now, whether its head
+        # is worth reading again at all.
+        def operation(sftp):
+            try:
+                with sftp.open(path, "rb") as f:
+                    data = f.read()
+                    mtime = f.stat().st_mtime
+            except FileNotFoundError:
+                return None, None
+            return json.loads(data.decode("utf-8")), mtime
+
+        return self._with_retry(operation)
+
+    def _list_dir_with_mtimes(self, path: str) -> list[tuple[str, float | None]]:
+        # listdir_attr already carries every entry's mtime; the plain listing
+        # throws it away and the caller then pays a read per entry to learn
+        # what changed. A peer's head is renamed into its directory, which
+        # moves that directory's mtime, so this listing answers "is there
+        # anything new here" for the whole topic in the round trip it was
+        # already making.
+        def operation(sftp):
+            try:
+                attrs = sftp.listdir_attr(path)
+            except FileNotFoundError:
+                return []
+            return sorted(
+                (a.filename, a.st_mtime)
+                for a in attrs if stat.S_ISDIR(a.st_mode or 0)
+            )
 
         return self._with_retry(operation)
 

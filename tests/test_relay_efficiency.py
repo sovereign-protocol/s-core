@@ -20,12 +20,14 @@ announces itself the moment its fix arrives and the marker must be removed then.
 """
 
 import tempfile
+import types
 import unittest
 from collections import Counter
 from pathlib import Path
 
 from sovereign.protocol import ProtocolNode
 from sovereign.relay_logic import RelayLogic, RelayManager
+from sovereign.relay_storage import SftpRelayStorage
 from sovereign.session import Session
 from sovereign.topic_registry import ApplicationRegistration
 
@@ -35,7 +37,8 @@ from sovereign.topic_registry import ApplicationRegistration
 # classified deliberately instead of silently escaping the budget.
 RELAY_OPERATIONS = frozenset({
     "write_snapshot", "read_head", "read_head_with_mtime", "read_snapshot",
-    "list_peers", "list_topics", "delete_publication", "delete_topic",
+    "list_peers", "list_peers_with_mtimes", "list_topics",
+    "delete_publication", "delete_topic",
     "write_presence", "read_presence_with_mtime", "timing_probe",
     "verify_access", "write_blob", "read_blob", "has_blob", "list_blob_ids",
     "write_blob_lease", "delete_blob_lease", "list_blob_leases",
@@ -45,13 +48,14 @@ RELAY_OPERATIONS = frozenset({
 #   1  write_presence          the heartbeat, unconditional by design
 #   1  read_presence_with_mtime the peer's heartbeat, cached across topics
 # and per topic:
-#   1  list_peers              once per cycle, reused by publication
+#   1  list_peers_with_mtimes  once per cycle, reused by publication, and the
+#                              mtimes tell us which heads are worth reading
 #   1  read_head               our own slot, for the sibling rule
-#   1  read_head_with_mtime    the peer's head
-# Step 5 of DESIGN_RELAY_EFFICIENCY.md removes the head read on a topic whose
-# peer directory has not been written to, taking the per-topic charge to 2.
+# A peer's head is no longer read on an idle cycle at all. What is left is one
+# listing and one own-slot read per topic; step 7 of DESIGN_RELAY_EFFICIENCY.md
+# takes the listing out too.
 IDLE_FIXED_OPERATIONS = 2
-IDLE_OPERATIONS_PER_TOPIC = 3
+IDLE_OPERATIONS_PER_TOPIC = 2
 
 
 class _CountingStorage:
@@ -71,7 +75,9 @@ class _CountingStorage:
 
         def recorded(*args, **kwargs):
             self.calls[name] += 1
-            if name == "list_peers":
+            # Both listing methods, so a caller switching between them cannot
+            # make the duplicate-listing test pass by measuring nothing.
+            if name in ("list_peers", "list_peers_with_mtimes"):
                 self.listed_topics.append(args[0])
             if name == "write_snapshot":
                 self.written_snapshots.append(args[2])
@@ -246,9 +252,8 @@ class IdlePollCycleCostTests(RelayEfficiencyCase):
         self.assertEqual(dict(relay_a.storage.calls), {
             "write_presence": 1,
             "read_presence_with_mtime": 1,
-            "list_peers": 3,
+            "list_peers_with_mtimes": 3,
             "read_head": 3,
-            "read_head_with_mtime": 3,
         })
 
     def test_an_idle_cycle_moves_no_content(self):
@@ -297,6 +302,186 @@ class IdlePollCycleCostTests(RelayEfficiencyCase):
         self.assertEqual(
             [uuid for uuid, count in listed.items() if count > 1], [],
         )
+
+
+class _RecordingSftp:
+    """Enough of an SFTP client to count what one read costs in round trips."""
+
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+        self.calls: list[str] = []
+
+    def open(self, path, _mode="rb"):
+        self.calls.append(f"open {path}")
+        data = self.files.get(path)
+        if data is None:
+            raise FileNotFoundError(path)
+        return _RecordingFile(self, data)
+
+    def stat(self, path):
+        self.calls.append(f"stat {path}")
+        return types.SimpleNamespace(st_mtime=1000.0, st_mode=0)
+
+
+class _RecordingFile:
+    def __init__(self, sftp: _RecordingSftp, data: bytes):
+        self._sftp = sftp
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self):
+        return self._data
+
+    def stat(self):
+        # fstat on the open handle - no path lookup, and paramiko pipelines
+        # it on the connection the read already opened.
+        self._sftp.calls.append("fstat")
+        return types.SimpleNamespace(st_mtime=1000.0)
+
+
+class OneVisitPerFileTests(unittest.TestCase):
+    """Content and timestamp come from the same visit, not two.
+
+    Over SFTP the difference is a whole round trip, paid on every head and
+    every heartbeat - per peer, per topic, per cycle. It is also the only way
+    the pair is coherent: a separate stat can describe a version the read did
+    not see, and this mtime decides both how stale a peer looks and whether
+    its head is read again at all.
+    """
+
+    def storage(self, files: dict[str, bytes]) -> tuple[SftpRelayStorage, _RecordingSftp]:
+        storage = SftpRelayStorage("host", "user", "/relay")
+        sftp = _RecordingSftp(files)
+        storage._sftp = sftp
+        return storage, sftp
+
+    def test_reading_a_head_costs_one_open_and_no_stat(self):
+        path = "/relay/topics/t1/peers/B/head.json"
+        storage, sftp = self.storage({path: b'{"hash": "abc"}'})
+
+        head, mtime = storage.read_head_with_mtime("t1", "B")
+
+        self.assertEqual(head, {"hash": "abc"})
+        self.assertEqual(mtime, 1000.0)
+        self.assertEqual(sftp.calls, [f"open {path}", "fstat"])
+
+    def test_reading_a_heartbeat_costs_one_open_and_no_stat(self):
+        path = "/relay/identities/B/presence.json"
+        storage, sftp = self.storage({path: b'{"identity": "B"}'})
+
+        presence, mtime = storage.read_presence_with_mtime("B")
+
+        self.assertEqual(presence, {"identity": "B"})
+        self.assertEqual(mtime, 1000.0)
+        self.assertEqual(sftp.calls, [f"open {path}", "fstat"])
+
+    def test_a_missing_file_answers_without_a_second_lookup(self):
+        storage, sftp = self.storage({})
+
+        self.assertEqual(storage.read_head_with_mtime("t1", "B"), (None, None))
+        self.assertEqual(
+            sftp.calls, ["open /relay/topics/t1/peers/B/head.json"],
+        )
+
+
+class SilenceIsOnlyTrustedWhenItIsProofTests(RelayEfficiencyCase):
+    """Not reading a head is a claim that nothing was written to it.
+
+    The saving is real - one round trip per peer per topic per cycle, the
+    largest recurring charge an idle client pays - but it is bought with an
+    inference, and the inference has a timing hole. SFTP reports mtimes in
+    whole seconds, so a write landing in the same second as the one just
+    observed leaves the slot looking untouched. Believing that would drop the
+    peer's change and keep dropping it until something else wrote into the
+    slot: a silent, open-ended sync failure, which is worse than any number
+    of wasted reads.
+    """
+
+    def test_a_head_written_between_cycles_is_still_read(self):
+        session_a, relay_a, made = self.publisher(1)
+        topic = made[0]
+        session_b, relay_b = self.subscriber({topic.uuid})
+        self.settle(relay_a, relay_b)
+
+        relay_a.poll_once()
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 0)
+
+        session_b.modify(
+            topic.uuid,
+            {**session_b.protocol.index[topic.uuid].data, "name": "moved on"},
+            {},
+        )
+        relay_b.publish_due_topics()
+
+        relay_a.storage.reset()
+        applied = relay_a.poll_once()
+
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 1)
+        self.assertIn((topic.uuid, "B"), applied.applied)
+
+    def test_a_slot_is_not_trusted_until_its_timestamp_has_aged(self):
+        # The guard, driven directly: a backend whose clock cannot resolve
+        # anything finer than an hour can never prove a slot was untouched,
+        # so every head is read, every cycle. Correctness before cost.
+        _, relay_a, made = self.publisher(2)
+        _, relay_b = self.subscriber({node.uuid for node in made})
+        relay_a.storage.mtime_resolution_seconds = 3600.0
+        self.settle(relay_a, relay_b)
+
+        relay_a.poll_once()
+
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 2)
+
+    def test_a_topic_waiting_to_be_grafted_keeps_being_offered(self):
+        # An unchanged slot means unchanged content, which is not the same as
+        # nothing left to do. A topic that arrived before this client could
+        # mount it is parked as a pending invitation and has to be offered
+        # again every poll; settling the slot would stop it being looked at
+        # and the graft would never be retried. Caught by s-team, where a
+        # subteam admitted later never appeared.
+        _, relay_a, made = self.publisher(1)
+        topic = made[0]
+
+        # No application registered, so the arriving subtree has no handler
+        # and stays a cache rather than being grafted.
+        session_b = Session("addr-b")
+        relay_b = self.connect(session_b, "B")
+        relay_b.set_scoped_topics({topic.uuid})
+        relay_b.mark_topics_desired([topic.uuid])
+        for _ in range(4):
+            relay_b.poll_once()
+        self.assertIsNone(session_b.protocol.index.get(topic.uuid))
+
+        relay_b.storage.reset()
+        relay_b.poll_once()
+
+        self.assertEqual(relay_b.storage.calls["read_head_with_mtime"], 1)
+
+    def test_a_returning_peer_is_read_again(self):
+        # A withdrawn publication clears `applied`, and the settled mtime has
+        # to go with it - otherwise the slot reappears with the mtime it left
+        # with, looks untouched, and the peer is never read again.
+        session_a, relay_a, made = self.publisher(1)
+        topic = made[0]
+        _, relay_b = self.subscriber({topic.uuid})
+        self.settle(relay_a, relay_b)
+        relay_a.poll_once()
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 0)
+
+        relay_b.withdraw_topic_publication(topic.uuid)
+        relay_a.poll_once()
+        relay_b.publish_due_topics()
+
+        relay_a.storage.reset()
+        applied = relay_a.poll_once()
+
+        self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 1)
+        self.assertIn((topic.uuid, "B"), applied.applied)
 
 
 class NoRedundantContentTransferTests(RelayEfficiencyCase):

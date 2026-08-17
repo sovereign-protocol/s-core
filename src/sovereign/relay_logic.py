@@ -254,6 +254,14 @@ class RelayLogic:
         # persisted copy would report peers as departed that this process
         # never saw arrive.
         self._relay_listed_peers: dict[str, set[str]] = {}
+        # Per topic and peer, the slot directory mtime whose head this client
+        # has already taken, and that head's own mtime. An unchanged
+        # directory mtime means an unchanged head, so the head is not read
+        # again - see _settle_slot for why silence is only trusted once the
+        # timestamp is older than the clock's resolution. In memory for the
+        # same reason as `applied`, which it is worthless without: a restart
+        # holds no peer cache, so it must read every head once regardless.
+        self._settled_head_mtimes: dict[str, dict[str, dict]] = {}
         # Topics where a sibling published something this client's own
         # unpublished work was not built on. In memory deliberately: the
         # condition is re-derived from `published` and the local tree on
@@ -894,6 +902,46 @@ class RelayLogic:
             due.append(topic_uuid)
         return due
 
+    def _settle_slot(self, settled_mtimes: dict, peer_id: str,
+                     directory_mtime: float | None,
+                     head_mtime: float | None) -> None:
+        """Record that this slot's head is known, if silence will stay proof.
+
+        The guard is the whole point, and it is a timing one. SFTP reports
+        mtimes in whole seconds (`mtime_resolution_seconds`), so a write that
+        lands in the same second as the one we just observed leaves the
+        directory looking untouched. Skipping on that would drop the peer's
+        change silently and keep dropping it until something else happened to
+        write into the slot - the worst shape of sync bug there is.
+
+        So a slot may only be settled once its timestamp is already older
+        than the clock's own resolution. From that moment on, any further
+        write must land in a later second and therefore must show. If the
+        server clock has not been calibrated yet, nothing is settled and
+        every head is read, which is merely the old cost.
+        """
+        if directory_mtime is None:
+            settled_mtimes.pop(peer_id, None)
+            return
+        resolution = getattr(self.storage, "mtime_resolution_seconds", 1.0)
+        server_now = self.timing.server_now()
+        if server_now is None or (server_now - directory_mtime) <= resolution:
+            settled_mtimes.pop(peer_id, None)
+            return
+        settled_mtimes[peer_id] = {
+            "directory": directory_mtime,
+            "head": head_mtime,
+        }
+
+    @staticmethod
+    def _slot_is_untouched(settled_mtime: float | None,
+                           listed_mtime: float | None) -> bool:
+        return (
+            settled_mtime is not None
+            and listed_mtime is not None
+            and settled_mtime == listed_mtime
+        )
+
     def _observed_digest(self, topic_uuid: str) -> str:
         observed = self._state.get("observed", {}).get(topic_uuid, {})
         observed_publications = self._state.get(
@@ -1068,6 +1116,11 @@ class RelayLogic:
             self._state.get("applied", {}).get(topic_uuid, {}).pop(
                 peer_id, None,
             )
+            # Settled with `applied`, and for the same reason: it says "the
+            # head behind this mtime is already taken", which is false once
+            # the cache it referred to is gone. A returning peer whose slot
+            # reappears with an unchanged mtime would otherwise never be read.
+            self._settled_head_mtimes.get(topic_uuid, {}).pop(peer_id, None)
             self.session.trace_event(
                 "relay.peer_publication_withdrawn",
                 relay_identity=self.identity,
@@ -1562,13 +1615,17 @@ class RelayLogic:
                 | set(self._state.get("desired", []))
             )
         for topic_uuid in topic_uuids:
-            listed_peer_ids = self.storage.list_peers(topic_uuid)
+            listed_mtimes = dict(
+                self.storage.list_peers_with_mtimes(topic_uuid),
+            )
+            listed_peer_ids = sorted(listed_mtimes)
             if peer_listings is not None:
                 # Publication reuses this rather than listing again a few
                 # hundred milliseconds later - see
                 # _relay_holds_our_publication.
                 peer_listings[topic_uuid] = listed_peer_ids
             self._forget_departed_relay_peers(topic_uuid, listed_peer_ids)
+            settled_mtimes = self._settled_head_mtimes.setdefault(topic_uuid, {})
             for peer_id in listed_peer_ids:
                 if peer_id == self.identity:
                     # Our own slot is not a no-op any more: with one
@@ -1607,6 +1664,41 @@ class RelayLogic:
                     if peer_id not in profile_blobs_read:
                         profile_blobs_read.add(peer_id)
                         self._cache_blobs(sorted(referenced_blob_ids(profile)))
+                settled = settled_mtimes.get(peer_id)
+                if (
+                    settled is not None
+                    and self._slot_is_untouched(
+                        settled["directory"], listed_mtimes.get(peer_id),
+                    )
+                ):
+                    # Nothing has been written into this peer's slot since the
+                    # cycle that settled it, so its head still says what it
+                    # said. Re-reading it would confirm that at the cost of a
+                    # round trip per peer per topic per cycle - the single
+                    # largest recurring charge in an idle client.
+                    #
+                    # Freshness still has to move: source_age_seconds is
+                    # "how old is what I am looking at", which grows while the
+                    # peer stays quiet. It is derived here from the head mtime
+                    # this slot settled on, so a silent peer goes stale on
+                    # schedule without being asked again.
+                    with self._presence_lock:
+                        own_presence_mtime = self._own_presence_mtime
+                    settled_head_mtime = settled["head"]
+                    with self._session_lock:
+                        self.session.observe_peer_perspective(
+                            peer_addr,
+                            topic_uuid,
+                            source_age_seconds=(
+                                max(0.0, own_presence_mtime - settled_head_mtime)
+                                if own_presence_mtime is not None
+                                and settled_head_mtime is not None
+                                else None
+                            ),
+                            source_timestamp=settled_head_mtime,
+                            channel_kind="mailbox",
+                        )
+                    continue
                 read_head_with_mtime = getattr(
                     self.storage, "read_head_with_mtime", None,
                 )
@@ -1617,6 +1709,7 @@ class RelayLogic:
                 else:
                     head = self.storage.read_head(topic_uuid, peer_id)
                     head_mtime = None
+                settled_mtimes.pop(peer_id, None)
                 if not head:
                     continue
                 with self._presence_lock:
@@ -1767,6 +1860,10 @@ class RelayLogic:
                         )
                         bookkeeping_changed = True
                         applied.add((topic_uuid, peer_id))
+                    self._settle_slot(
+                        settled_mtimes, peer_id,
+                        listed_mtimes.get(peer_id), head_mtime,
+                    )
                     continue
                 # A state hash is content identity, so a head naming the hash
                 # this client already holds names content this client already
@@ -1873,6 +1970,19 @@ class RelayLogic:
                     )
                 self._state["applied"].setdefault(topic_uuid, {})[peer_id] = state_hash
                 applied.add((topic_uuid, peer_id))
+                if not wants_graft:
+                    # Same condition the unchanged-hash short-circuit uses,
+                    # and for the same reason: a topic that arrived while it
+                    # could not yet be mounted is parked as a pending
+                    # invitation and has to be offered again on the next poll.
+                    # Settling here would stop the slot being looked at, and
+                    # the graft would never be retried - the topic stays a
+                    # cache forever, which is how a subteam admitted later
+                    # never appeared.
+                    self._settle_slot(
+                        settled_mtimes, peer_id,
+                        listed_mtimes.get(peer_id), head_mtime,
+                    )
                 self.session.trace_event(
                     "relay.publication_cached",
                     relay_identity=self.identity,
@@ -1969,6 +2079,9 @@ class RelayLogic:
             "peer_observed_publications", "applied",
         ):
             self._state[key].pop(topic_uuid, None)
+        # Not in _state - in memory beside `applied`, and dropped with it.
+        self._settled_head_mtimes.pop(topic_uuid, None)
+        self._relay_listed_peers.pop(topic_uuid, None)
 
     @_relay_io_locked
     def delete_topic(self, topic_uuid: str) -> SessionResult:
