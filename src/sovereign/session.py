@@ -3740,6 +3740,227 @@ class Session:
             return None
         return node
 
+    # A link is a node that references a topic. It says where the reference
+    # is and nothing about what the topic contains.
+    #
+    # Applications own where links live - a link is an ordinary child of
+    # whatever refers to the topic, so a card's hangs off the card and a
+    # team's off the team. Core owns what a link is: the node type, the field
+    # naming the topic, and what following one does.
+    #
+    # Nothing keeps a table of them. "Where do I reference this topic from"
+    # is a walk of this client's own tree, because the links are the record
+    # and a second copy of them could only ever disagree with it.
+    TOPIC_LINK_TYPE = "topic_link"
+
+    @_session_locked
+    def create_topic_link(
+        self,
+        parent_uuid: str,
+        topic_uuid: str,
+        application_id: str,
+        title: str = "",
+    ) -> SessionResult:
+        """Record that *parent_uuid* references *topic_uuid*.
+
+        `title` is a convenience copy and may be stale. It is what the link
+        says when the thing it points at is not held here yet; once the topic
+        is held, its own name wins.
+        """
+        parent = self._protocol.index.get(str(parent_uuid or ""))
+        if parent is None:
+            return SessionResult("error", reason="link parent not found")
+        target = str(topic_uuid or "").strip()
+        if not target:
+            return SessionResult("error", reason="a link needs a topic")
+        # A topic referring to itself says nothing, and following it would
+        # offer this client an invitation to what it is already reading.
+        if self._is_descendant_or_self(target, parent.uuid):
+            return SessionResult(
+                "error", reason="a topic cannot link to itself",
+            )
+        # Only what this client has already said. Two actors referencing one
+        # topic from the same parent is not a duplicate - it is the whole
+        # mechanism by which a team's list of what it runs is the union of
+        # its members' own references, and by which removing yours leaves
+        # everybody else's standing. Saying the same thing twice yourself is
+        # the only case with nothing in it.
+        for existing in parent.children:
+            if (
+                not existing.deleted
+                and existing.data.get("type") == self.TOPIC_LINK_TYPE
+                and existing.data.get("topic_uuid") == target
+                and self._authored_here(existing)
+            ):
+                return SessionResult(
+                    "error", reason="you have already linked that here",
+                )
+        return self.create_child(
+            parent.uuid,
+            {
+                "type": self.TOPIC_LINK_TYPE,
+                "topic_uuid": target,
+                "application_id": str(application_id or "").strip(),
+                "title": str(title or "").strip(),
+            },
+            {},
+        )
+
+    def remove_topic_link(self, link_uuid: str) -> SessionResult:
+        """Delete one reference. The topic is untouched, and so is every
+        other reference to it - including other people's."""
+        link = self.topic_link(link_uuid)
+        if link is None:
+            return SessionResult("error", reason="link not found")
+        return self.delete(link.uuid)
+
+    @_session_locked
+    def topic_link(self, link_uuid: str) -> ProtocolNode | None:
+        node = self._protocol.index.get(str(link_uuid or ""))
+        if (
+            node is None
+            or node.deleted
+            or node.data.get("type") != self.TOPIC_LINK_TYPE
+        ):
+            return None
+        return self._snapshot_node(node)
+
+    @_session_locked
+    def topic_links(
+        self,
+        parent_uuid: str | None = None,
+        authored_here: bool = False,
+    ) -> list[ProtocolNode]:
+        """Links in this client's tree, optionally under one parent.
+
+        `authored_here` narrows to the ones this client wrote. A replicated
+        link is somebody else's statement that this client holds a copy of;
+        which of the two it is decides who may remove it, so the two are
+        never conflated.
+        """
+        return [
+            self._snapshot_node(node)
+            for node in self._walk_topic_links(parent_uuid)
+            if not authored_here or self._authored_here(node)
+        ]
+
+    @_session_locked
+    def links_to(
+        self, topic_uuid: str, authored_here: bool = False,
+    ) -> list[ProtocolNode]:
+        """Every place this client references *topic_uuid* from.
+
+        This is a closed question about one tree, not a claim about the
+        network. A peer's references are theirs and are not counted here:
+        their perspectives are cached outside the protocol tree, which is
+        what makes the walk answer the local question and only that one.
+        """
+        target = str(topic_uuid or "").strip()
+        if not target:
+            return []
+        return [
+            self._snapshot_node(node)
+            for node in self._walk_topic_links()
+            if node.data.get("topic_uuid") == target
+            and (not authored_here or self._authored_here(node))
+        ]
+
+    def _walk_topic_links(
+        self, parent_uuid: str | None = None,
+    ) -> list[ProtocolNode]:
+        root = (
+            self._protocol.index.get(str(parent_uuid))
+            if parent_uuid else self._protocol.root
+        )
+        if root is None:
+            return []
+        found = []
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.deleted:
+                continue
+            if node.data.get("type") == self.TOPIC_LINK_TYPE:
+                found.append(node)
+            stack.extend(node.children)
+        return found
+
+    def _authored_here(self, node: ProtocolNode) -> bool:
+        """Whether this client signed the revision the node currently holds.
+
+        The signature is the only answer there is. A link carries no author
+        field, and one would be a second copy of what the revision already
+        proves - which could then disagree with it.
+        """
+        origin = self._local_revision_origin()
+        return bool(origin) and node.revision_origin == origin
+
+    @_session_locked
+    def drop_topic(self, topic_uuid: str) -> SessionResult:
+        """Stop holding a topic without destroying it.
+
+        Nothing is published, because nothing is deleted - a peer sees this
+        client stop publishing, which is what it also sees when somebody
+        closes their laptop. It is the opposite act to `delete`, which writes
+        a tombstone that travels and which stays with the application that
+        owns the topic, the only one that knows who may destroy it.
+
+        A peer who still publishes the topic will offer it back as an
+        invitation. That is intended: nothing was destroyed, this client
+        stopped keeping it, and it remains available.
+        """
+        target = str(topic_uuid or "").strip()
+        node = self._protocol.index.get(target)
+        if node is None:
+            return SessionResult("error", reason="topic not found")
+        remaining = [
+            link for link in self._walk_topic_links()
+            if link.data.get("topic_uuid") == target
+        ]
+        if remaining:
+            return SessionResult(
+                "error",
+                reason=(
+                    f"still referenced from {len(remaining)} place"
+                    f"{'' if len(remaining) == 1 else 's'} here"
+                ),
+            )
+        released = self.end_topic_sharing(target)
+        removed = self._protocol.remove_subtree_uuids(
+            self._protocol.root.uuid, {target},
+        )
+        if not removed.ok:
+            return SessionResult("error", reason=removed.reason)
+        self.trace_event("session.topic_dropped", topic_uuid=target)
+        return SessionResult(
+            "ok", value=target, effects=list(released.effects),
+        )
+
+    def follow_topic_link(self, link_uuid: str) -> SessionResult:
+        """Hold what a link points at, where a peer is publishing it.
+
+        A link to a topic this client does not have is not broken - it is an
+        invitation. The uuid alone grants nothing: mounting reaches only
+        topics a peer's perspective actually carries, so a link is a name for
+        something, never a key to it.
+        """
+        link = self.topic_link(link_uuid)
+        if link is None:
+            return SessionResult("error", reason="link not found")
+        target = str(link.data.get("topic_uuid") or "")
+        if self.get_node(target) is not None:
+            return SessionResult("ok", value=target)
+        self.note_pending_topic_invitation(target)
+        mounted = self.mount_cached_topics(
+            str(link.data.get("application_id") or ""),
+        )
+        if target not in mounted:
+            return SessionResult(
+                "error",
+                reason="nobody here is publishing it yet",
+            )
+        return SessionResult("ok", value=target)
+
     def known_identities(self) -> list[dict]:
         """Every identity this session can currently put a name and picture to.
 

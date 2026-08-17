@@ -115,6 +115,47 @@ exposes detached query snapshots plus explicit board, card, agenda, reaction,
 and policy commands. S-Cockpit consumes it without declaring S-Initiative
 as a package dependency.
 
+## Topic links
+
+A `topic_link` node records that one node references a topic. Applications own
+where links live — a link is an ordinary child of whatever refers to the topic,
+so a card's link hangs off the card and a team's off the team. Core owns what a
+link is: `topic_uuid`, `application_id`, and a `title` that is a convenience
+copy for use before the topic is held. Once it is held, its own name wins.
+
+`Session.create_topic_link(parent_uuid, topic_uuid, application_id, title)`
+writes one, refusing a topic that would link to itself and a duplicate **this
+client has already written** under that parent. Two actors referencing one
+topic from the same parent is not a duplicate: it is how a team's list of what
+it runs is the union of its members' own references, and how removing yours
+leaves everybody else's standing.
+
+`topic_links(parent_uuid=None, authored_here=False)` and
+`links_to(topic_uuid, authored_here=False)` walk this client's own tree;
+nothing is stored about where links are, because the links are the record.
+`authored_here` narrows to the ones this client signed — a replicated link is
+somebody else's statement, and which of the two it is decides who may remove
+it. `topic_link(link_uuid)` returns one as a detached snapshot.
+
+Three acts, and they are not the same act:
+
+- `remove_topic_link(link_uuid)` deletes one reference. The topic is untouched,
+  and so is every other reference to it, including other people's.
+- `drop_topic(topic_uuid)` stops this client holding the topic: it ends sharing
+  and removes the local subtree without writing a tombstone, so nothing is
+  published and a peer sees only that this client stopped publishing. It
+  refuses while any link here still points at the topic. That count is a closed
+  question about one tree and never a claim about the network.
+- `Session.delete` is neither, and stays with the application that owns the
+  topic — the only one that knows who may destroy it.
+
+`follow_topic_link(link_uuid)` holds what a link points at. A link to a topic
+this client does not have is not broken, it is an invitation: the call notes a
+pending invitation and mounts the topic if a peer's perspective carries it, and
+reports that nobody is publishing it when none does. The uuid alone grants
+nothing, so a link names a topic and is never a key to it. A peer who still
+publishes a dropped topic offers it back the same way.
+
 ## Channel extension API
 
 `Channel` is the required extension contract. A channel opts into independent

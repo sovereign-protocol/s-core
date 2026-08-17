@@ -2,6 +2,32 @@
 
 ## 0.1.9
 
+- **Topic links, and the three acts that are not the same act.** A `topic_link`
+  node records that one node references a topic; applications own where links
+  live, Core owns what one is and what following it does. Nothing keeps a table
+  of them, because the links are the record: `links_to(topic_uuid)` walks this
+  client's own tree. `remove_topic_link` deletes one reference and leaves the
+  topic and every other reference to it, including other people's.
+  `drop_topic` stops this client holding a topic — it ends sharing and removes
+  the local subtree *without writing a tombstone*, so nothing is published and
+  a peer sees only that this client stopped publishing; it refuses while any
+  link here still points at the topic, and that count is a closed question
+  about one tree rather than a claim about the network. `Session.delete` is
+  neither of those and stays with the application that owns the topic, the only
+  one that knows who may destroy it. `follow_topic_link` treats a link to a
+  topic this client does not hold as an invitation rather than a broken
+  reference, mounting it where a peer's perspective carries it and saying
+  nobody is publishing it where none does — so a link names a topic and is
+  never a key to it. See `DESIGN_TOPIC_LINKS.md` and `PUBLIC_API.md`.
+
+  A duplicate is judged **per author**, not per parent: two actors referencing
+  one topic from one parent is not a duplicate but the mechanism by which a
+  team's list of what it runs is the union of its members' own references, and
+  by which removing yours leaves everybody else's standing. `topic_links` and
+  `links_to` take `authored_here` to tell the two apart, and `topic_links`
+  takes a parent. An application wanting one reference whoever wrote it says
+  so itself.
+
 - **One palette for transition state, defined once.** A stage now has a colour
   token in `shared.css` — conflict, awaiting me, in transition — in two tones,
   because coloured text on a dark header and a filled dot cannot be the same
