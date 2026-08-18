@@ -144,6 +144,40 @@ class TopicLinkTests(unittest.TestCase):
         self.assertIsNotNone(session.get_node(referenced.uuid))
         self.assertEqual(len(session.links_to(referenced.uuid)), 1)
 
+    def test_somebody_elses_reference_is_not_yours_to_remove(self):
+        """Yours to remove means yours to have written.
+
+        A link is adopted same-origin, so a deletion written over another
+        client's reference is one their peers refuse: locally gone, remotely
+        standing, and back on the next sync. Saying so once beats leaving
+        that to be discovered.
+        """
+        author = Session("si-author")
+        second = Session("si-reader")
+        author.identity
+        second.identity
+        holder = make_topic(author, "Holder")
+        referenced = make_topic(author, "Referenced")
+        author.create_topic_link(holder.uuid, referenced.uuid, "notes", "Ref")
+        second.adopt_subtree(
+            ProtocolNode.from_dict(
+                author.protocol.index[holder.uuid].to_dict(),
+            ),
+            second.protocol.root.uuid,
+        )
+        theirs = second.links_to(referenced.uuid)[0]
+
+        refused = second.remove_topic_link(theirs.uuid)
+
+        self.assertEqual(refused.status, "error")
+        self.assertIn("not yours", refused.reason)
+        self.assertEqual(len(second.links_to(referenced.uuid)), 1)
+        # And the one this client did write comes off as usual.
+        second.create_topic_link(holder.uuid, referenced.uuid, "notes", "Ref")
+        mine = second.links_to(referenced.uuid, authored_here=True)[0]
+        self.assertEqual(second.remove_topic_link(mine.uuid).status, "ok")
+        self.assertEqual(len(second.links_to(referenced.uuid)), 1)
+
     def test_a_drop_is_refused_while_a_link_still_points_at_it(self):
         session = Session("si-gated")
         holder = make_topic(session, "Holder")

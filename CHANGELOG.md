@@ -2,6 +2,86 @@
 
 ## 0.1.9
 
+- **An application says how its own topics are made, once.**
+  `ApplicationRegistration` takes `topic_noun`, `template_required`,
+  `list_templates` and `create_topic(title, template, snapshot)`; Core answers
+  `Session.topic_kinds()` and `Session.create_application_topic(...)` from
+  them. All three ways of starting are one call — from nothing, from a
+  template the owning application listed, or from a snapshot document it
+  exported — and Core reads neither the template id nor the document.
+
+  This replaced a table in each of three applications: the Cockpit, S-Team and
+  S-Initiative each carried a noun, a facade api version, a per-kind template
+  lookup and a create path per kind, all restating what the owning application
+  already knew. They had drifted, too — one could start a team from a file and
+  another could not. An application that registers none of the four simply
+  cannot have its topics made from elsewhere, which is the right answer for
+  one that owns none.
+
+- **The bar says what you are looking at and where else you can go.**
+  `setTopicSelector` becomes `setTopicName` — a name, edited in place, with
+  no list of the application's other topics beside it: reaching another topic
+  goes through the Cockpit, which is the principle the shell already stated
+  and the switcher predated. `setTopicLinks({links, make, link, onFollow,
+  onRemove})` supplies what this topic references.
+  `topicHref(applicationId, topicUuid)` composes any application's topic URL
+  from `application_summaries()`, so no application knows another's route —
+  every application now opens a topic through `?topic=<uuid>`.
+
+  The bar is five objects on three regions — collaboration, navigation,
+  connections. `[Agenda · N]` and `[Changes · N]` on the left, each counting
+  only what it is named for. The topic centred in the middle under its
+  application's mark, with a row of destinations beneath it: the topics this
+  one names, then everything you hold. Who is here on the right. It had grown
+  thirteen visual treatments across four border languages, three corner radii
+  and five type sizes, with a grid that could not centre anything; the shape
+  vocabulary is now two shapes, two type sizes, and no border at rest.
+  `setAppActions` is gone with it — the bar holds nothing of an
+  application's. See `DESIGN_UI_CONSISTENCY.md` U7.
+
+- **One word per concept, decided before the pixels moved.** "Topic" was
+  Core's protocol noun, an agenda field's placeholder and a word nobody
+  applies to their own team; "Aligned" collided head-on with S-Team's
+  Agreement, which is a document people accept; one sync state carried four
+  surface words and people carried three. The user-facing vocabulary is now
+  fixed — changes, needs your review, conflict, waiting on others, adopt,
+  people — while every internal name is untouched, because they are precise
+  and nobody reads them. There is deliberately no collective noun: where the
+  shell must name an initiative, an organization and a flow at once it
+  composes from `topic_noun` or avoids the noun. See `DESIGN_VOCABULARY.md`.
+
+- **Icons have three classes and three construction rules.** An application
+  mark depicts what the application holds and is built from whole shapes that
+  survive 18px; an object glyph carries one idea in four strokes; an act uses
+  the conventional drawing and is never invented. The three destructions stay
+  visually apart, because conflating them once cost a list removal that
+  called `delete_process` and destroyed the thing everywhere: a minus in a
+  circle is off my side and reversible, a trash can is gone for everyone, and
+  `×` is reserved for close so it can never be read as either. See
+  `DESIGN_UI_CONSISTENCY.md` U8.
+
+- **Third-party icon attribution.** `NOTICE` gains an MIT section for the
+  Feather-derived paths and the Tabler-derived geometry, with `LICENSES/MIT.txt`
+  beside it. It says which marks are original and is given as a precaution
+  where a shape is merely the obvious drawing of its object.
+
+- **A reference is removed by whoever wrote it.** `remove_topic_link` refuses
+  a link this client did not author. A link is adopted same-origin, so a
+  deletion written over somebody else's reference is one their peers refuse:
+  locally gone, remotely standing, and back on the next sync. Saying so once
+  beats leaving it to be discovered.
+
+- **One dialog makes a topic, wherever it is made.**
+  `SovereignShell.openNewTopicDialog({noun, templates, templateRequired,
+  blankLabel, snapshotType, onCreate})` asks the three questions that making a
+  topic always asks — what it is called, what it starts from, or a snapshot
+  file instead of both — and hands the answers back. Core owns the shape, the
+  wording built from the noun, and reading and refusing a snapshot file; the
+  application owns what a template is and what creating actually calls. There
+  were four copies of this form, three in the Cockpit and one in S-Team, and
+  the S-Team one was the only place a snapshot could not be loaded — nobody
+  decided that, it is what a copy costs. See `DESIGN_UI_CONSISTENCY.md` U5.
+
 - **Topic links, and the three acts that are not the same act.** A `topic_link`
   node records that one node references a topic; applications own where links
   live, Core owns what one is and what following it does. Nothing keeps a table

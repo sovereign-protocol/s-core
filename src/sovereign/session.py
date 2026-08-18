@@ -814,6 +814,49 @@ class Session:
         return self.shared_topics.handler_for(tree)
 
     @_session_locked
+    def topic_kinds(self) -> list[dict]:
+        """What kinds of topic can be made on this client.
+
+        `[{application_id, noun, template_required, templates}]`, from the
+        applications that said how one of theirs is made. An application
+        wanting to offer another's topics - a team making the initiatives it
+        runs, an aggregate making anything - reads this instead of keeping
+        its own table of how each one is created.
+        """
+        return self.shared_topics.topic_kinds()
+
+    @_session_locked
+    def create_application_topic(
+        self, application_id: str, title: str, template: str = "",
+        snapshot: dict | None = None,
+    ) -> SessionResult:
+        """Make a topic of another application's kind, from nothing, from one
+        of its templates, or from a snapshot document it exported.
+
+        The making is that application's, and this reads nothing it is
+        handed: which workflow a template id names, and what a valid
+        snapshot holds, are its answers. What comes back is a uuid.
+        """
+        normalized = str(title or "").strip()
+        if not normalized:
+            return SessionResult("error", reason="a name is required")
+        created = self.shared_topics.make_topic(
+            application_id, normalized, template, snapshot,
+        )
+        if created is None:
+            return SessionResult(
+                "error",
+                reason=f"{application_id or 'that application'} is not available here",
+            )
+        if getattr(created, "status", None) != "ok":
+            return created
+        return SessionResult(
+            "ok",
+            value=str(getattr(created.value, "uuid", created.value) or ""),
+            effects=created.effects,
+        )
+
+    @_session_locked
     def supports_shared_topic(self, tree: ProtocolNode | None) -> bool:
         return self.shared_topics.supports(tree)
 
@@ -3808,10 +3851,21 @@ class Session:
 
     def remove_topic_link(self, link_uuid: str) -> SessionResult:
         """Delete one reference. The topic is untouched, and so is every
-        other reference to it - including other people's."""
+        other reference to it - including other people's.
+
+        Yours to remove means yours to have written. A link is adopted
+        same-origin, so a deletion this client authors over somebody else's
+        reference is one their peers will refuse: locally gone, remotely
+        standing, and back on the next sync. Refusing here says so once
+        instead of leaving that to be discovered.
+        """
         link = self.topic_link(link_uuid)
         if link is None:
             return SessionResult("error", reason="link not found")
+        if not self._authored_here(link):
+            return SessionResult(
+                "error", reason="that reference is not yours to remove",
+            )
         return self.delete(link.uuid)
 
     @_session_locked

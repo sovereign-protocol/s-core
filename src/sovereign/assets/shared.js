@@ -14,6 +14,9 @@
 const THEME_STORAGE_KEY = "sovereign.theme";
 const THEMES = ["dark", "light"];
 const DEFAULT_THEME = "dark";
+// A snapshot is a document, not a medium: anything this size is somebody
+// having chosen the wrong file, and reading it would freeze the tab first.
+const SNAPSHOT_FILE_LIMIT = 50 * 1024 * 1024;
 
 function storedTheme() {
   try {
@@ -39,9 +42,14 @@ applyTheme(storedTheme());
 
 const ICON_CLOSE = '<path d="M18 6 6 18"></path><path d="M6 6l12 12"></path>';
 const ICON_CHEVRON_DOWN = '<path d="M6 9l6 6 6-6"></path>';
+// A circle and eight ticks, not Feather's twenty-node gear: the bar renders
+// this at 18px, where that path is a blob. U8.
 const ICON_SETTINGS =
-  '<circle cx="12" cy="12" r="3"></circle>' +
-  '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>';
+  '<circle cx="12" cy="12" r="3.2"></circle>' +
+  '<path d="M12 3v2.4"></path><path d="M12 18.6V21"></path>' +
+  '<path d="M3 12h2.4"></path><path d="M18.6 12H21"></path>' +
+  '<path d="M5.6 5.6l1.7 1.7"></path><path d="M16.7 16.7l1.7 1.7"></path>' +
+  '<path d="M18.4 5.6l-1.7 1.7"></path><path d="M7.3 16.7l-1.7 1.7"></path>';
 const ICON_EXPAND =
   '<path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M21 8V5a2 2 0 0 0-2-2h-3"></path>' +
   '<path d="M3 16v3a2 2 0 0 0 2 2h3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>';
@@ -57,13 +65,20 @@ const ICON_SHARE =
   '<circle cx="18" cy="19" r="3"></circle>' +
   '<path d="M8.59 13.51 15.42 17.49"></path><path d="M15.41 6.51 8.59 10.49"></path>';
 
-// Two people in conversation - the collaboration pane's mark, kept as an icon
-// rather than a word so the header reads at a glance in every application.
-const ICON_COLLABORATION =
-  '<path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"></path>' +
-  '<path d="M16 10a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"></path>' +
-  '<path d="M3.5 19c.6-3 2.3-5 4.5-5s3.9 2 4.5 5"></path>' +
-  '<path d="M12.5 18c.5-2.3 1.8-3.8 3.5-3.8s3 1.5 3.5 3.8"></path>';
+// The two controls the bar's left holds (U7). An ordered list of things to
+// discuss, and changes moving between copies - each counting only the thing
+// it is named for.
+const ICON_AGENDA =
+  '<circle cx="5" cy="7" r="1.1"></circle><circle cx="5" cy="12" r="1.1"></circle>' +
+  '<circle cx="5" cy="17" r="1.1"></circle>' +
+  '<path d="M9 7h10"></path><path d="M9 12h10"></path><path d="M9 17h6"></path>';
+const ICON_CHANGES =
+  '<path d="M4 9h13"></path><path d="M14 6l3 3-3 3"></path>' +
+  '<path d="M20 15H7"></path><path d="M10 12l-3 3 3 3"></path>';
+// Off my side, and reversible. Never the trash can, which destroys for
+// everyone - see DESIGN_TOPIC_LINKS.md and U8.
+const ICON_REMOVE =
+  '<circle cx="12" cy="12" r="8.5"></circle><path d="M8.5 12h7"></path>';
 
 function iconButton(svgInner, label, action) {
   const button = document.createElement("button");
@@ -978,7 +993,7 @@ function transitionSentence(info) {
   const peer = transitionActorLabel(info);
   const fallback =
     {
-      in_agreement: "Aligned",
+      in_agreement: "No open changes",
       peer_made_changes: `Changes from ${peer}`,
       local_made_changes: `My changes not in ${peer}`,
       local_missing_node: `Only in ${peer}`,
@@ -1131,6 +1146,16 @@ function openActionMenu(anchor, items = [], options = {}) {
       menu.append(separator);
       continue;
     }
+    // Names a group without being one of its choices: not focusable, and
+    // skipped by the arrow keys, which walk buttons only.
+    if (item.heading) {
+      const heading = document.createElement("div");
+      heading.className = "ui-action-menu-heading";
+      heading.setAttribute("role", "presentation");
+      heading.textContent = item.heading;
+      menu.append(heading);
+      continue;
+    }
     const choice = document.createElement("button");
     choice.type = "button";
     choice.className = `ui-action-menu-option ${item.danger ? "is-danger" : ""}`.trim();
@@ -1218,7 +1243,7 @@ const SovereignShell = {
   // and the application performs it, because only it knows its own routes.
   async mount(options) {
     this._options = options;
-    const nav = this._buildHeader(options.container, options);
+    this._buildHeader(options.container, options);
     const applications = await this.applications();
     const current = applications.find((app) => app.application_id === options.applicationId);
     if (current) {
@@ -1231,24 +1256,9 @@ const SovereignShell = {
           '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">' + current.icon + "</svg>";
       }
     }
-    // Topic applications return through the Cockpit instead of forming a
-    // second navigation mesh among themselves.
-    const cockpit = applications.find((app) => app.role === "aggregator");
-    if (cockpit && cockpit.application_id !== options.applicationId) {
-      const link = document.createElement("a");
-      link.className = "shell-nav-link icon-btn";
-      link.href = cockpit.asset_prefix;
-      link.title = cockpit.display_name;
-      link.setAttribute("aria-label", cockpit.display_name);
-      if (cockpit.icon) {
-        link.innerHTML =
-          '<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">' + cockpit.icon + "</svg>";
-      } else {
-        link.textContent = cockpit.display_name.slice(0, 1).toUpperCase();
-      }
-      nav.append(link);
-    }
-
+    // The Cockpit entry on the navigation row is composed from what the host
+    // reports, so the row cannot be drawn until that has arrived.
+    this._renderTopicContext();
     this.refresh();
     this.refreshAvatar();
     if (!this._sharingRefreshTimer) {
@@ -1483,58 +1493,59 @@ Object.assign(SovereignShell, {
     container.classList.add("shell-bar");
     container.replaceChildren();
 
-    // ---- left: this topic --------------------------------------------
+    // ---- left: collaboration -------------------------------------------
+    //
+    // Two controls, each counting the thing it is named for. A setting and a
+    // status count never share one, which is what the auto-adopt indicator
+    // beside a divergence count used to be (U7).
     const left = document.createElement("div");
     left.className = "shell-left";
 
-    const collaboration = iconButton(ICON_COLLABORATION, "Collaboration", () => this.openCollab());
-    collaboration.id = "shellDisagreementBtn";
-    collaboration.classList.add("shell-collab-btn");
+    const agenda = this._countButton("shellAgendaBtn", ICON_AGENDA, "Agenda");
+    const changes = this._countButton("shellChangesBtn", ICON_CHANGES, "Changes");
+    left.append(agenda, changes);
+
+    // ---- middle: navigation ---------------------------------------------
+    //
+    // The anchor of the bar, and the only thing in it on two lines. The mark
+    // alone and not the application's name: beside a topic's own name the
+    // wordmark is the redundant half, and an icon says which application
+    // this is without competing to be read.
+    const middle = document.createElement("div");
+    middle.className = "shell-middle";
+
+    const lockup = document.createElement("div");
+    lockup.className = "shell-lockup";
+
+    const mark = document.createElement("span");
+    mark.className = "shell-app-mark";
+    mark.id = "shellAppMark";
+    mark.textContent = (options.applicationId || "?").slice(0, 1).toUpperCase();
+    // Named for a screen reader, which cannot see what the mark shows. The
+    // element stays for `mount` to fill; it is not drawn.
+    const name = document.createElement("span");
+    name.className = "shell-app-name";
+    name.id = "shellAppName";
 
     const topic = document.createElement("div");
     topic.className = "shell-topic";
     topic.id = "shellTopicRegion";
 
-    // A button, not a label: it says "Open transitions", so it has
-    // to open them. Saying where to go and then not going there is the one
-    // thing a status line must never do.
-    const status = document.createElement("button");
-    status.type = "button";
-    status.id = "shellTopicStatus";
-    status.className = "shell-topic-status";
-    status.onclick = () => this.openCollab();
+    lockup.append(mark, name, topic);
 
-    left.append(collaboration, topic, status);
+    // Where else you can go, nearest first: what this topic names, then
+    // everything you hold. The title line says what you are looking at and
+    // holds two elements only, which is what lets it read as the anchor;
+    // every destination lives on this row instead.
+    const context = document.createElement("div");
+    context.className = "shell-context";
+    context.id = "shellTopicContext";
 
-    // ---- middle: which application -----------------------------------
-    const middle = document.createElement("div");
-    middle.className = "shell-middle";
+    middle.append(lockup, context);
 
-    const brand = document.createElement("span");
-    brand.className = "shell-brand";
-    const mark = document.createElement("span");
-    mark.className = "shell-app-mark";
-    mark.id = "shellAppMark";
-    mark.textContent = (options.applicationId || "?").slice(0, 1).toUpperCase();
-    const name = document.createElement("span");
-    name.className = "shell-app-name";
-    name.id = "shellAppName";
-    brand.append(mark, name);
-
-    const nav = document.createElement("nav");
-    nav.className = "shell-nav";
-
-    middle.append(brand, nav);
-
-    // ---- right: who is here ------------------------------------------
+    // ---- right: connections ---------------------------------------------
     const actions = document.createElement("div");
     actions.className = "shell-actions";
-
-    // An application's own header controls go here rather than beside the
-    // shell, so the bar has one owner and one order everywhere.
-    const appActions = document.createElement("div");
-    appActions.className = "shell-app-actions";
-    appActions.id = "shellAppActions";
 
     const connection = document.createElement("button");
     connection.type = "button";
@@ -1550,9 +1561,33 @@ Object.assign(SovereignShell, {
     avatar.title = "Edit your profile";
     avatar.onclick = () => this.openProfile();
 
-    actions.append(appActions, connection, avatar);
+    actions.append(connection, avatar);
     container.append(left, middle, actions);
-    return nav;
+  },
+
+  // One shape for both left-hand controls: a mark, and the count of what it
+  // is named for. No count means no number, not a zero - a zero is a fact
+  // nobody needs and it makes an empty bar look busy.
+  _countButton(id, icon, label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = id;
+    button.className = "shell-count-btn";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.onclick = () => this.openCollab();
+    button.innerHTML =
+      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${icon}</svg>` +
+      '<span class="shell-count"></span>';
+    return button;
+  },
+
+  _setCount(id, count, label) {
+    const button = document.getElementById(id);
+    if (!button) return;
+    const slot = button.querySelector(".shell-count");
+    slot.textContent = count > 0 ? String(count) : "";
+    button.setAttribute("aria-label", count > 0 ? `${label}: ${count}` : label);
   },
 
   theme() {
@@ -1583,96 +1618,304 @@ Object.assign(SovereignShell, {
     if (node) region.append(node);
   },
 
-  setTopicSelector(options) {
+  // The name of what you are looking at, edited in place where the
+  // application allows it. Nothing beside it selects another one: a list of
+  // an application's own topics in its own header was a second navigation
+  // mesh, and the Cockpit is the first. See DESIGN_UI_CONSISTENCY U3.
+  setTopicName(options = {}) {
     const region = document.getElementById("shellTopicRegion");
     if (!region) return;
-    let picker = region.querySelector(".shell-topic-picker");
-    if (!picker) {
-      region.replaceChildren();
-      picker = document.createElement("div");
-      picker.className = "shell-topic-picker";
-
-      const title = document.createElement("span");
+    let title = region.querySelector(".shell-topic-title");
+    if (!title) {
+      title = document.createElement("span");
       title.className = "shell-topic-title";
-
-      const toggle = iconButton('<path d="M6 9l6 6 6-6"></path>', "Switch topic", () =>
-        picker.classList.toggle("open"),
-      );
-      toggle.classList.add("shell-topic-switch-btn");
-
-      const menu = document.createElement("div");
-      menu.className = "shell-topic-menu";
-      picker.append(title, toggle, menu);
-      region.append(picker);
-
-      if (!this._topicPickerEventsReady) {
-        document.addEventListener("keydown", (event) => {
-          if (event.key === "Escape") {
-            document
-              .querySelectorAll(".shell-topic-picker.open")
-              .forEach((entry) => entry.classList.remove("open"));
-          }
-        });
-        document.addEventListener("click", (event) => {
-          const target =
-            event.target instanceof Element ? event.target : event.target.parentElement;
-          if (!target?.closest(".shell-topic-picker")) {
-            document
-              .querySelectorAll(".shell-topic-picker.open")
-              .forEach((entry) => entry.classList.remove("open"));
-          }
-        });
-        this._topicPickerEventsReady = true;
-      }
+      region.replaceChildren(title);
     }
-
-    picker._options = options || {};
-    const topics = options.topics || [];
-    const selected = topics.find((topic) => topic.uuid === options.selectedUuid) || null;
-    const title = picker.querySelector(".shell-topic-title");
+    // The label is the kind - "Initiative", "Organization", "Flow" - and it
+    // names the field rather than being drawn beside the name. The mark to
+    // its left already says which application this is, so a word saying the
+    // same thing is the redundant half, exactly as U3 found for the wordmark.
     SovereignUI.editableText({
       element: title,
-      value: selected?.title || "",
-      placeholder: options.label || "Topic",
-      ariaLabel: options.label || "Topic",
-      editable: Boolean(selected && options.onRename),
+      value: options.title || "",
+      placeholder: options.label || "Name",
+      ariaLabel: options.label || "Name",
+      editable: Boolean(options.title && options.onRename),
       onCommit: async (value) => {
-        const currentOptions = picker._options || {};
-        if (currentOptions.onRename) await currentOptions.onRename(value);
+        if (options.onRename) await options.onRename(value);
       },
     });
-
-    const menu = picker.querySelector(".shell-topic-menu");
-    menu.replaceChildren();
-    for (const topic of topics) {
-      const choice = document.createElement("button");
-      choice.type = "button";
-      choice.className = "shell-topic-option";
-      choice.textContent = topic.title || "Untitled";
-      choice.disabled = topic.uuid === options.selectedUuid;
-      choice.onclick = async () => {
-        picker.classList.remove("open");
-        if (!options.onSelect || choice.disabled) return;
-        try {
-          await options.onSelect(topic.uuid);
-        } catch (error) {
-          showToast(error.message, true);
-        }
-      };
-      menu.append(choice);
-    }
-    picker.querySelector(".shell-topic-switch-btn").hidden = topics.length < 2;
+    this._renderTopicContext();
     // Re-attached here rather than only once at mount: this method builds
-    // the picker on first use, so anything appended before that would be
-    // lost with it.
+    // the region's contents on first use, so anything appended before that
+    // would be lost with them.
     this._attachTopicActions();
   },
 
-  setAppActions(...nodes) {
-    const region = document.getElementById("shellAppActions");
-    if (!region) return;
-    region.replaceChildren();
-    for (const node of nodes) if (node) region.append(node);
+  // Where another application's topic is opened. Composed from what the host
+  // reports about active applications, so no application knows another one's
+  // route - and one deactivated here removes its entry instead of leaving a
+  // link that goes nowhere.
+  topicHref(applicationId, topicUuid) {
+    const application = (this._applications || []).find(
+      (entry) => entry.application_id === String(applicationId || ""),
+    );
+    if (!application || !topicUuid) return "";
+    return `${application.asset_prefix}?topic=${encodeURIComponent(topicUuid)}`;
+  },
+
+  // What this topic is attached to: the team an initiative belongs to, the
+  // flows it runs, the work a team has taken on. Core draws them and carries
+  // out the two acts that are Core's - taking up a reference you do not hold
+  // yet, and removing one. The application says which links exist and what
+  // making one calls; it does not say who may remove one, because that is
+  // not a rule anybody sets: a link is adopted same-origin, so the only one
+  // you can take off is the one you put up.
+  //
+  // Only links on the topic itself belong here. A card naming the process it
+  // waits on belongs beside the card - in the bar it would be a fact about
+  // something you cannot see.
+  //
+  // links  [{uuid, topic_uuid, application_id, label, title, held, mine}]
+  // make   [{label, onSelect}] - a kind that can be made and linked at once
+  // link   [{label, onSelect}] - one of your own topics, not referenced here
+  //
+  // U7 split this in two. Going somewhere is the switcher menu beside the
+  // name; managing what this is attached to - taking up a reference, letting
+  // one go, making a new one - is the dialog behind "Link related...". They
+  // were one row of chips because navigating and administering look alike
+  // from the outside; they are different frames, and the frame you enter
+  // deliberately is the one that stays closed.
+  setTopicLinks(options = {}) {
+    this._topicLinks = options;
+    this._renderTopicContext();
+    if (document.getElementById("shellRelateDialog")?.open) this._renderRelateDialog();
+  },
+
+  // Beneath the name: where else you can go, nearest range first. What this
+  // topic names, then everything you hold, with the rule between them saying
+  // the range changed - which is the one thing whitespace cannot state.
+  //
+  // Names only. The kind is what a chip used to announce in small capitals,
+  // and it earned nothing: the destination says what it is the moment you
+  // arrive, and a line that is uniformly one class of thing can be uniformly
+  // clickable. Hover brightens rather than emboldens, because a weight
+  // change reflows the row and drags everything right of it sideways.
+  _renderTopicContext() {
+    const context = document.getElementById("shellTopicContext");
+    if (!context) return;
+    context.replaceChildren();
+
+    // An aggregator draws nothing here: it already shows every topic you
+    // hold, so a row offering to take you to some of them, and to the
+    // aggregator itself, is the second navigation mesh Core has refused
+    // since U3. With no topic selected there is likewise nothing to place.
+    const current = (this._applications || []).find(
+      (app) => app.application_id === this._options.applicationId,
+    );
+    if (current && current.role === "aggregator") return;
+    if (!this._options.topicUuid || !this._topic()) return;
+
+    const held = ((this._topicLinks || {}).links || []).filter((link) => link.held);
+    // Only the names shrink. The controls after them are `flex: none`, so a
+    // long list truncates itself rather than pushing them off the bar.
+    const names = document.createElement("div");
+    names.className = "shell-context-links";
+    for (const [index, link] of held.entries()) {
+      if (index) {
+        const dot = document.createElement("span");
+        dot.className = "shell-context-dot";
+        dot.setAttribute("aria-hidden", "true");
+        dot.textContent = "·";
+        names.append(dot);
+      }
+      names.append(this._contextLink(link));
+    }
+    context.append(names);
+
+    // Always present, never a count. "Link related…" has to be reachable
+    // whether or not anything overflowed, and a control that appears only
+    // sometimes is one nobody learns. Its menu lists every related topic, so
+    // overflow is not a case the reader has to be told about.
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "shell-related-menu";
+    more.title = "Related";
+    more.setAttribute("aria-label", "Related");
+    more.innerHTML =
+      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_CHEVRON_DOWN}</svg>`;
+    this._buildRelatedMenu(more);
+    context.append(more);
+
+    // The widest range, and the last thing on the row. Absent where no
+    // application registered as an aggregator - the wording that names it
+    // has nothing to name then either (DESIGN_VOCABULARY.md).
+    const cockpit = (this._applications || []).find((app) => app.role === "aggregator");
+    if (cockpit && cockpit.application_id !== this._options.applicationId) {
+      const pipe = document.createElement("span");
+      pipe.className = "shell-context-pipe";
+      pipe.setAttribute("aria-hidden", "true");
+
+      const link = document.createElement("a");
+      link.className = "shell-cockpit-btn";
+      link.href = cockpit.asset_prefix;
+      link.title = `Open ${cockpit.display_name}`;
+      link.setAttribute("aria-label", `Open ${cockpit.display_name}`);
+      link.innerHTML = cockpit.icon
+        ? `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${cockpit.icon}</svg>`
+        : cockpit.display_name.slice(0, 1).toUpperCase();
+      context.append(pipe, link);
+    }
+  },
+
+  _contextLink(link) {
+    const href = this.topicHref(link.application_id, link.topic_uuid);
+    const anchor = document.createElement("a");
+    anchor.className = "shell-context-link";
+    anchor.textContent = link.title || "Untitled";
+    anchor.title = link.label ? `${link.label}: ${anchor.textContent}` : anchor.textContent;
+    if (href) anchor.href = href;
+    return anchor;
+  },
+
+  // Every related topic, whether or not it fitted on the row, and the one
+  // act that is not a destination. References you have not taken up are
+  // deliberately absent: taking one up is an act, and it lives in the dialog
+  // with the other acts rather than among places to go.
+  _buildRelatedMenu(button) {
+    SovereignUI.actionMenu({
+      button,
+      align: "start",
+      // Read when the menu opens, not when the button was made: what this is
+      // attached to changes with every sync.
+      items: () => {
+        const links = ((this._topicLinks || {}).links || []).filter((link) => link.held);
+        const items = [];
+        if (links.length) {
+          items.push({heading: "Related"});
+          for (const link of links) {
+            items.push({
+              label: link.title || "Untitled",
+              onSelect: () => {
+                const href = this.topicHref(link.application_id, link.topic_uuid);
+                if (href) window.location.href = href;
+              },
+            });
+          }
+          items.push({separator: true});
+        }
+        items.push({label: "Link related…", onSelect: () => this.openRelateDialog()});
+        return items;
+      },
+    });
+  },
+
+  // Everything about what this topic is attached to that is not going there:
+  // taking up a reference somebody else made, letting one of mine go, and
+  // making a new one.
+  openRelateDialog() {
+    if (!this._relateReady) {
+      const host = document.createElement("div");
+      host.innerHTML = [
+        '<dialog id="shellRelateDialog" class="shell-dialog">',
+        '<div class="shell-pane-header">',
+        "<strong>Related</strong>",
+        '<button type="button" id="shellRelateClose" class="shell-pane-close" aria-label="Close">&times;</button>',
+        "</div>",
+        '<div class="shell-dialog-body">',
+        '<div id="shellRelateRows" class="shell-link-rows"></div>',
+        '<div id="shellRelateActions" class="shell-row"></div>',
+        "</div></dialog>",
+      ].join("");
+      document.body.append(...host.children);
+      this._relateReady = true;
+      document.getElementById("shellRelateClose").onclick = () =>
+        document.getElementById("shellRelateDialog").close();
+    }
+    this._renderRelateDialog();
+    document.getElementById("shellRelateDialog").showModal();
+  },
+
+  _renderRelateDialog() {
+    const rows = document.getElementById("shellRelateRows");
+    const actions = document.getElementById("shellRelateActions");
+    if (!rows) return;
+    const current = this._topicLinks || {};
+    rows.replaceChildren();
+    const links = current.links || [];
+    if (!links.length) {
+      const empty = document.createElement("p");
+      empty.className = "shell-note";
+      empty.textContent = "Nothing is linked to this yet.";
+      rows.append(empty);
+    }
+    for (const link of links) rows.append(this._relateRow(link));
+
+    actions.replaceChildren();
+    const offers = [...(current.make || []), ...(current.link || [])].filter(Boolean);
+    for (const offer of offers) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-button";
+      button.textContent = offer.label;
+      button.onclick = async () => {
+        document.getElementById("shellRelateDialog").close();
+        await offer.onSelect(offer);
+      };
+      actions.append(button);
+    }
+  },
+
+  _relateRow(link) {
+    const row = document.createElement("div");
+    row.className = `shell-link-row${link.held ? "" : " unheld"}`;
+
+    const label = document.createElement("span");
+    label.className = "shell-link-label";
+    label.textContent = link.label || "";
+
+    const title = document.createElement("span");
+    title.className = "shell-link-title";
+    title.textContent = String(link.title || "Untitled");
+    row.append(label, title);
+
+    const act = document.createElement("button");
+    act.type = "button";
+    act.className = "ui-button shell-link-act";
+    if (link.held) {
+      // One reference, gone. What it points at is untouched, and so is
+      // everybody else's reference to it - which is why this asks nothing.
+      // The minus, never the trash can: this is off my side, not destroyed.
+      act.innerHTML =
+        `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
+      act.title = "Remove from my Cockpit. What it points at is kept";
+      act.setAttribute("aria-label", "Remove from my Cockpit");
+      act.hidden = link.mine === false;
+      act.onclick = async () => {
+        await this._actOnTopicLink("onRemove", link);
+        this._renderRelateDialog();
+      };
+    } else {
+      // Not broken - an invitation. Following it reaches only what a peer is
+      // already publishing here, so it resolves or it says nobody is.
+      act.textContent = "Add to Cockpit";
+      act.onclick = async () => {
+        await this._actOnTopicLink("onFollow", link);
+        this._renderRelateDialog();
+      };
+    }
+    row.append(act);
+    return row;
+  },
+
+  async _actOnTopicLink(kind, link) {
+    const handler = (this._topicLinks || {})[kind];
+    if (!handler) return;
+    try {
+      await handler(link);
+    } catch (error) {
+      showToast(error.message, true);
+    }
   },
 
   // A decision about the topic itself belongs beside the topic's name, not
@@ -1691,6 +1934,184 @@ Object.assign(SovereignShell, {
     if (!region) return;
     const host = region.querySelector(".shell-topic-picker") || region;
     if (node.parentElement !== host) host.append(node);
+  },
+
+  // ---- making a topic ----------------------------------------------------
+  //
+  // Making a topic has one shape wherever it starts from: a name, what it
+  // starts from, and a snapshot file as an alternative to both. There were
+  // four of these - three in the Cockpit and one in S-Team - identical but
+  // for the noun, and the S-Team one was the only place a snapshot could
+  // not be loaded. That is U1's argument arriving on schedule: the dialog
+  // is Core's functionality, so its appearance and its rules are Core's.
+  //
+  // What each entry means stays the application's. Core knows a template is
+  // a value with a label; whether that value is a board to copy, a team to
+  // clone or a workflow definition is not its business, and neither is what
+  // creating actually calls.
+
+  _ensureNewTopicDialog() {
+    if (this._newTopicReady) return;
+    const host = document.createElement("div");
+    host.innerHTML = [
+      '<dialog id="shellNewTopicModal" class="shell-dialog">',
+      '<form method="dialog" class="shell-panel" id="shellNewTopicForm">',
+      '<h2 id="shellNewTopicHeading">New topic</h2>',
+      '<label for="shellNewTopicName">Name</label>',
+      '<input id="shellNewTopicName" class="ui-text-field">',
+      '<div id="shellNewTopicTemplateRow" class="shell-new-topic-row">',
+      '<label for="shellNewTopicTemplate">Create from</label>',
+      '<select id="shellNewTopicTemplate" class="ui-select"></select>',
+      '<p id="shellNewTopicTemplateNote" class="shell-note"></p>',
+      "</div>",
+      '<div id="shellNewTopicSnapshotRow" class="shell-new-topic-row">',
+      '<button type="button" id="shellNewTopicSnapshotBtn">Load snapshot file…</button>',
+      '<input type="file" id="shellNewTopicSnapshotFile"',
+      ' accept=".s-snapshot,application/json" hidden>',
+      '<p id="shellNewTopicSnapshotNote" class="shell-note"></p>',
+      "</div>",
+      "<menu>",
+      '<button type="button" id="shellNewTopicCancelBtn">Cancel</button>',
+      '<button type="submit" class="primary">Create</button>',
+      "</menu></form></dialog>",
+    ].join("");
+    document.body.append(...host.children);
+    this._newTopicReady = true;
+
+    const file = document.getElementById("shellNewTopicSnapshotFile");
+    document.getElementById("shellNewTopicCancelBtn").onclick = () =>
+      document.getElementById("shellNewTopicModal").close();
+    document.getElementById("shellNewTopicSnapshotBtn").onclick = () => {
+      // Cleared first so choosing the same file twice still fires change.
+      file.value = "";
+      file.click();
+    };
+    file.onchange = () => this._loadSnapshotChoice(file.files?.[0] || null);
+    document.getElementById("shellNewTopicTemplate").onchange = () =>
+      this._showTemplateDescription();
+    document.getElementById("shellNewTopicForm").onsubmit = (event) => {
+      event.preventDefault();
+      this._submitNewTopic();
+    };
+  },
+
+  // noun               what is being made, for the heading and the placeholder
+  // templates          [{value, label, group, description}], as selectOptions
+  // templateRequired   a flow has no meaning without one; an initiative does
+  // blankLabel         what starting from nothing is called
+  // snapshotType       the item_type a snapshot file must carry, or omitted
+  //                    where this application cannot make one from a file
+  // onCreate           ({name, template, option, snapshot}) - the application's
+  openNewTopicDialog(options = {}) {
+    this._ensureNewTopicDialog();
+    const noun = String(options.noun || "Topic").toLowerCase();
+    this._newTopic = {options, noun, snapshot: null};
+
+    document.getElementById("shellNewTopicHeading").textContent = `New ${noun}`;
+    const name = document.getElementById("shellNewTopicName");
+    name.value = "";
+    name.placeholder = `Untitled ${noun}`;
+
+    const templates = options.templates || [];
+    const required = Boolean(options.templateRequired);
+    const select = document.getElementById("shellNewTopicTemplate");
+    select.required = required;
+    SovereignUI.selectOptions(
+      select,
+      templates,
+      required
+        ? {value: templates[0]?.value ?? ""}
+        : {emptyLabel: options.blankLabel || "Start empty", value: ""},
+    );
+    // Nothing to choose and nothing required is not an empty menu, it is no
+    // question: an application with no templates asks only for a name.
+    document.getElementById("shellNewTopicTemplateRow").hidden =
+      !templates.length && !required;
+    document.getElementById("shellNewTopicSnapshotRow").hidden =
+      !options.snapshotType;
+
+    this._clearSnapshotChoice();
+    this._showTemplateDescription();
+    document.getElementById("shellNewTopicModal").showModal();
+  },
+
+  _clearSnapshotChoice() {
+    if (this._newTopic) this._newTopic.snapshot = null;
+    document.getElementById("shellNewTopicSnapshotFile").value = "";
+    this._note("shellNewTopicSnapshotNote", "");
+    const select = document.getElementById("shellNewTopicTemplate");
+    select.disabled = false;
+    SovereignUI.refreshSelect(select);
+  },
+
+  async _loadSnapshotChoice(chosen) {
+    if (!chosen) return;
+    const state = this._newTopic || {noun: "topic", options: {}};
+    const select = document.getElementById("shellNewTopicTemplate");
+    const name = document.getElementById("shellNewTopicName");
+    try {
+      if (chosen.size > SNAPSHOT_FILE_LIMIT) {
+        throw new Error("Snapshot file is too large.");
+      }
+      const snapshot = JSON.parse(await chosen.text());
+      // The server checks this too and is the authority. Reading it here is
+      // so the wrong file is refused while the dialog is still open, rather
+      // than after a create that had nowhere to go.
+      if (
+        snapshot?.format !== "s-protocol.item-snapshot"
+        || snapshot?.format_version !== 1
+        || snapshot?.item_type !== String(state.options.snapshotType || "")
+        || typeof snapshot?.content !== "object"
+        || snapshot.content === null
+      ) {
+        throw new Error(`This file does not hold a ${state.noun} snapshot.`);
+      }
+      this._clearSnapshotChoice();
+      state.snapshot = snapshot;
+      this._note(
+        "shellNewTopicSnapshotNote", `Loaded: ${snapshot.name || chosen.name}`,
+      );
+      // A snapshot is what it starts from, so there is nothing left to
+      // choose. Disabled rather than quietly ignored.
+      select.disabled = true;
+      SovereignUI.refreshSelect(select);
+      if (!name.value.trim() && snapshot.source_name) {
+        name.value = snapshot.source_name;
+      }
+    } catch (error) {
+      this._clearSnapshotChoice();
+      this._note(
+        "shellNewTopicSnapshotNote",
+        error instanceof SyntaxError
+          ? "Snapshot file is not valid JSON."
+          : error.message,
+      );
+    }
+  },
+
+  _showTemplateDescription() {
+    const select = document.getElementById("shellNewTopicTemplate");
+    this._note(
+      "shellNewTopicTemplateNote",
+      select.selectedOptions[0]?.dataset.description || "",
+    );
+  },
+
+  _submitNewTopic() {
+    const state = this._newTopic;
+    if (!state) return;
+    const select = document.getElementById("shellNewTopicTemplate");
+    const name =
+      document.getElementById("shellNewTopicName").value.trim()
+      || `Untitled ${state.noun}`;
+    const snapshot = state.snapshot;
+    const option = snapshot ? null : select.selectedOptions[0] || null;
+    document.getElementById("shellNewTopicModal").close();
+    if (state.options.onCreate) {
+      state.options.onCreate({
+        name, snapshot, option, template: snapshot ? "" : select.value,
+      });
+    }
   },
 
   // ---- profile -----------------------------------------------------------
@@ -1861,73 +2282,40 @@ Object.assign(SovereignShell, {
       .filter((item) => item.type && item.type !== "in_agreement");
   },
 
+  // One number, and it counts what a decision is owed on: a conflict, or a
+  // change of somebody else's waiting for me. Not what is still travelling -
+  // a count that includes what you cannot act on is a count you learn to
+  // ignore. Travelling is still visible: the control pulses (U7).
   refreshDisagreements() {
-    const button = document.getElementById("shellDisagreementBtn");
-    const status = document.getElementById("shellTopicStatus");
-    if (!button) return;
+    const changes = document.getElementById("shellChangesBtn");
+    if (!changes) return;
+    const state = this._options.state ? this._options.state() : {};
+    this._setCount("shellAgendaBtn", (state.agenda_items || []).length, "Agenda");
+
     // Agreement state is a property of one topic. An application that shows
-    // many at once - an overview - has no single answer, so the whole left
-    // region collapses rather than claiming one.
+    // many at once - an overview - has no single answer, so the control
+    // stands down rather than claiming one.
     if (!this._options.topicUuid || !this._topic()) {
-      button.hidden = false;
-      button.disabled = true;
-      button.classList.remove("has-divergence", "has-items");
-      button.title = "Select a topic first";
-      if (status) status.hidden = true;
+      changes.disabled = true;
+      changes.classList.remove("has-conflict", "is-moving");
+      this._setCount("shellChangesBtn", 0, "Changes");
+      changes.title = "Select one first";
       return;
     }
-    button.disabled = false;
-    button.hidden = false;
+    changes.disabled = false;
     const items = this._disagreements();
-    // Only a two-sided conflict is something to resolve. A change of my own
-    // that the peer has merely observed is not - counting it as one is what
-    // put the author in the red bucket with nothing to act on.
     const conflicts = items.filter((item) => item.stage === "conflict").length;
     const mine = items.filter((item) => item.stage === "awaiting_me").length;
-    button.classList.toggle("has-divergence", conflicts > 0);
-    button.classList.toggle("has-items", items.length > 0);
-    button.title = items.length
-      ? "Open transitions"
-      : "Everything on this topic is Aligned";
-    if (!status) return;
-    // Each side is told about its own obligation, so the two screens never
-    // contradict each other: only a conflict is mine to resolve, an incoming
-    // change is mine to review, and my own change in flight is neither.
-    //
-    // Every non-empty band is shown, not just the worst of them: one thing to
-    // review and one still travelling are two different facts about two
-    // different nodes, and reporting only the more urgent one left the other
-    // invisible. Aligned says nothing at all - silence is the state, and the
-    // button's tooltip still says so on hover.
-    const transit = items.length - conflicts - mine;
-    const bands = [
-      { count: conflicts, state: "conflict", text: "to resolve" },
-      { count: mine, state: "review", text: "to review" },
-      { count: transit, state: "pending", text: "in transition" },
-    ].filter((band) => band.count > 0);
-    status.hidden = true;
-    for (const extra of this._statusBands || []) extra.remove();
-    this._statusBands = [];
-    if (!bands.length) return;
-    // The element already in the markup carries the first band, so a host
-    // that styles or queries it keeps working; the rest are siblings of it.
-    const [first, ...rest] = bands;
-    status.hidden = false;
-    status.textContent = `${first.count} ${first.text}`;
-    status.dataset.state = first.state;
-    status.title = button.title;
-    let anchor = status;
-    for (const band of rest) {
-      const extra = status.cloneNode(false);
-      extra.textContent = `${band.count} ${band.text}`;
-      extra.dataset.state = band.state;
-      extra.title = button.title;
-      extra.hidden = false;
-      extra.onclick = status.onclick;
-      anchor.after(extra);
-      anchor = extra;
-      this._statusBands.push(extra);
-    }
+    const moving = items.length - conflicts - mine;
+    const owed = conflicts + mine;
+    this._setCount("shellChangesBtn", owed, "Changes");
+    changes.classList.toggle("has-conflict", conflicts > 0);
+    changes.classList.toggle("is-moving", moving > 0);
+    changes.title = owed
+      ? `${conflicts} in conflict, ${mine} needing your review`
+      : moving
+        ? "Waiting on others"
+        : "No open changes";
   },
 
   // Rendering the unsettled list is separate from where it is shown, so the
@@ -1939,7 +2327,7 @@ Object.assign(SovereignShell, {
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "shell-note";
-      empty.textContent = "Nothing in transition.";
+      empty.textContent = "No open changes.";
       list.append(empty);
       return;
     }
@@ -2028,13 +2416,21 @@ Object.assign(SovereignShell, {
       "<h3>Agenda</h3>",
       '<div id="shellAgendaList" class="shell-agenda-list"></div>',
       '<form id="shellAgendaForm" class="shell-row">',
-      '<input id="shellAgendaText" placeholder="Add a discussion topic">',
+      '<input id="shellAgendaText" placeholder="Add an agenda item">',
       '<button type="submit">Add</button>',
       "</form>",
       "</div>",
       '<div class="shell-pane-section">',
-      '<h3 id="shellNotAlignedTitle">In transition</h3>',
+      '<h3 id="shellNotAlignedTitle">Changes</h3>',
       '<div id="shellDisagreementList" class="shell-disagreement-list"></div>',
+      // The standing rule sits under the queue it governs: the list is what
+      // the rule did not decide. It was in the connections pane, where it
+      // read as a property of the channel rather than of how arriving work
+      // is handled (U7).
+      '<div id="shellCollabAutoAdopt" class="shell-pane-subsection">',
+      "<h4>Incoming changes</h4>",
+      '<div id="shellCollabAutoAdoptControl"></div>',
+      "</div>",
       "</div>",
       "</aside>",
     ].join("");
@@ -2170,7 +2566,7 @@ Object.assign(SovereignShell, {
     if (mine && routes?.move) {
       row.classList.add("has-drag");
       row.append(SovereignUI.reorderHandle({
-        label: "Reorder discussion topic",
+        label: "Reorder agenda item",
       }));
     }
 
@@ -2269,7 +2665,7 @@ Object.assign(SovereignShell, {
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "shell-note";
-      empty.textContent = "No discussion topics on this topic yet.";
+      empty.textContent = "No agenda items yet.";
       list.append(empty);
     }
     for (const item of items) list.append(this._agendaRow(item));
@@ -2302,10 +2698,13 @@ Object.assign(SovereignShell, {
   // Labels for the two universal modes. An application offering more supplies
   // its own labels; Core shows the raw mode rather than inventing wording for
   // a policy it does not interpret.
-  AUTO_ADOPT_LABELS: { always: "Adopt automatically", never: "Hold for me to decide" },
+  AUTO_ADOPT_LABELS: {
+    always: "Adopt incoming changes automatically",
+    never: "Review each change first",
+  },
   AUTO_ADOPT_DESCRIPTIONS: {
-    always: "Peer changes are adopted automatically.",
-    never: "Peer changes wait for you to review and adopt them.",
+    always: "Changes from other people are adopted automatically.",
+    never: "Changes from other people wait for you to review and adopt them.",
   },
 
   _autoAdoptControl() {
@@ -2373,6 +2772,12 @@ Object.assign(SovereignShell, {
     this._ensureCollabPane();
     this._renderAgenda();
     this._renderDisagreementList(document.getElementById("shellDisagreementList"));
+    const adoptSection = document.getElementById("shellCollabAutoAdopt");
+    const adoptControl = document.getElementById("shellCollabAutoAdoptControl");
+    adoptControl.replaceChildren();
+    const adopt = this._autoAdoptControl();
+    if (adopt) adoptControl.append(adopt);
+    adoptSection.hidden = !adopt;
     document.getElementById("shellCollabOverlay").hidden = false;
     document.getElementById("shellCollabPane").hidden = false;
     // The page insets beside the pane instead of being covered by it.
@@ -2397,16 +2802,12 @@ Object.assign(SovereignShell, {
       '<div id="shellConnOverlay" class="shell-pane-overlay" hidden></div>',
       '<aside id="shellConnPane" class="shell-pane shell-pane-right" hidden>',
       '<div class="shell-pane-header">',
-      "<strong>Sharing &amp; Sync</strong>",
+      "<strong>People and channels</strong>",
       '<button type="button" id="shellConnCloseBtn" class="shell-pane-close" aria-label="Close">&times;</button>',
       "</div>",
       '<div class="shell-pane-section">',
-      "<h3>Involved Individuals</h3>",
+      "<h3>People</h3>",
       '<div id="shellPeersList" class="shell-peers-list"></div>',
-      "</div>",
-      '<div class="shell-pane-section" id="shellConnAutoAdopt">',
-      "<h3>Automatic adoption</h3>",
-      '<div id="shellConnAutoAdoptControl"></div>',
       "</div>",
       '<div class="shell-pane-section">',
       "<h3>Channels</h3>",
@@ -2540,13 +2941,6 @@ Object.assign(SovereignShell, {
 
   async openConnectionPanel() {
     this._ensureConnectionsPane();
-
-    const autoAdoptSection = document.getElementById("shellConnAutoAdopt");
-    const autoAdoptControl = document.getElementById("shellConnAutoAdoptControl");
-    autoAdoptControl.replaceChildren();
-    const adopt = this._autoAdoptControl();
-    if (adopt) autoAdoptControl.append(adopt);
-    autoAdoptSection.hidden = !adopt;
 
     // With no topic there is nothing to share yet, so the one thing the pane
     // can still do - join someone else's topic - is opened straight away.

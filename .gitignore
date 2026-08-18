@@ -6,6 +6,10 @@ build/
 dist/
 data/
 traces/
+s-core/data/
+s-cockpit/data/
+s-flow/data/
+s-inventory/data/
 # Rendered from dependency-inventory.json; never edited by hand.
 constraints.txt
 *.log

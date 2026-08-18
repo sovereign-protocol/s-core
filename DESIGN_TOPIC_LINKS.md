@@ -132,6 +132,15 @@ flow it runs.
   exactly the decision worth showing. A card's link to a private topic is the
   case still open: a reference to something the reader cannot reach, where a
   permanent invitation may be noise rather than information.
+
+  **Where it renders is settled** (`DESIGN_UI_CONSISTENCY.md` U6): a link on
+  the topic itself is drawn by Core in the bar, beside the topic's name; a
+  link on a node inside the topic is drawn beside that node. Beside the card
+  an unreachable reference is information; in the topbar it would be noise.
+  Same-origin also answers who may remove one, and it is not a rule any
+  application sets: `remove_topic_link` refuses a link this client did not
+  author, because a deletion written over somebody else's reference is one
+  their peers refuse and the next sync brings back.
 - **What a drop leaves behind.** Links elsewhere in this client's tree that
   pointed at a dropped topic become unheld references. They should render as
   invitations rather than as errors, but nothing prunes them.

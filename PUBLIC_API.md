@@ -115,6 +115,32 @@ exposes detached query snapshots plus explicit board, card, agenda, reaction,
 and policy commands. S-Cockpit consumes it without declaring S-Initiative
 as a package dependency.
 
+## Making a topic
+
+An application says how one of its own topics is made, once, on its
+`ApplicationRegistration`: `topic_noun` (what one is called to a person),
+`template_required`, `list_templates()` returning `{value, name, description}`,
+and `create_topic(title, template, snapshot)` returning a `SessionResult`
+naming the new topic. All three ways of starting are its own — from nothing,
+from a template it listed, or from a snapshot document it exported. An
+application that leaves these out cannot have one of its topics made from
+anywhere else, which is the right answer for one that owns none.
+
+Anybody offering to make another application's topic reads that:
+
+- `Session.topic_kinds()` — `[{application_id, noun, template_required,
+  templates}]` for the applications running here that said how. A kind that is
+  not present is not offered, rather than offered and then refused.
+- `Session.create_application_topic(application_id, title, template="",
+  snapshot=None)` — makes one and returns its uuid. Core reads neither the
+  template id nor the snapshot document; what a valid one contains is the
+  owning application's answer.
+
+This replaced a table in each of three applications — a noun, a facade api
+version, a per-kind template lookup and a create path per kind — all of them
+restating what the owning application already knew, and drifting: one could
+start a team from a file and another could not.
+
 ## Topic links
 
 A `topic_link` node records that one node references a topic. Applications own
@@ -140,7 +166,10 @@ it. `topic_link(link_uuid)` returns one as a detached snapshot.
 Three acts, and they are not the same act:
 
 - `remove_topic_link(link_uuid)` deletes one reference. The topic is untouched,
-  and so is every other reference to it, including other people's.
+  and so is every other reference to it, including other people's. It refuses a
+  link this client did not author: a link is adopted same-origin, so a deletion
+  written over somebody else's reference is one their peers refuse, and it
+  returns on the next sync.
 - `drop_topic(topic_uuid)` stops this client holding the topic: it ends sharing
   and removes the local subtree without writing a tombstone, so nothing is
   published and a peer sees only that this client stopped publishing. It
