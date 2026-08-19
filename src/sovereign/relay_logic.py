@@ -111,6 +111,20 @@ from .relay_timing import PRESENCE_LIVENESS_MARGIN, RelayTiming
 from .versions import CHANNEL_DESCRIPTOR_VERSION, CONNECT_TOKEN_VERSION
 
 
+# The three facts in relay bookkeeping that no relay can re-answer: what this
+# client accepted, what it offered, and which of those are identity topics.
+# They live with the session, keyed by target - see DESIGN_RELAY_CONSENT.md -
+# and never in the state file. `pair_all_topics` was here once and is not
+# consent: only pairing sets it, nothing clears it, and what it says is that
+# the *link* carries a sibling. It lives in the target record.
+CONSENT_KEYS = ("desired", "shared", "identity_topics")
+
+# Read-path conveniences, derived on load and never written anywhere: the
+# answer lives in the target record, this is only where the poll and the
+# publish loop read it from without asking the registry every cycle.
+PROJECTED_KEYS = ("pair_all_topics",)
+
+
 def _storage_fingerprint(config: dict) -> str:
     backend = config.get("relay_backend", "local")
     if backend == "sftp":
@@ -140,6 +154,15 @@ def default_relay_state_file(config: dict, identity: str) -> str:
     app_name = str(config.get("app_module") or "app").replace(".", "_")
     safe_identity = re.sub(r"[^A-Za-z0-9_-]+", "_", identity).strip("_") or "default"
     fingerprint = hashlib.sha256(_storage_fingerprint(config).encode("utf-8")).hexdigest()[:12]
+    directory = config.get("relay_state_directory")
+    if directory:
+        # A state directory belongs to one instance, so the location alone
+        # names the file inside it - the same name RelayManager gives a
+        # connection built from a target, so one setting now places every
+        # connection an instance makes. Without this the setting reached
+        # target connections only, and the implicit one went on writing into
+        # the shared data/ below however the instance was configured.
+        return str(Path(directory) / f"relay-{fingerprint}.json")
     return str(
         Path.cwd() / "data"
         / f"relay_state_{app_name}_{safe_identity}_{fingerprint}.json"
@@ -271,11 +294,24 @@ class RelayLogic:
         # location-derived default - kept so adopt_storage_from_descriptor
         # honors the pin instead of recomputing a data/ path.
         self._configured_state_file = config.get("relay_state_file")
+        # Held separately from the pin: the storage location decides what the
+        # file is called, but only the config says where it lives, and the
+        # _config_from_storage below carries location fields alone.
+        self._state_directory = config.get("relay_state_directory")
         state_config = self._config_from_storage(self.storage) if self.storage else config
-        self._state_path = self._configured_state_file or default_relay_state_file(
-            state_config, self.identity,
+        self._state_path = self._configured_state_file or self._default_state_path(
+            state_config,
         )
         self._state = self._load_state()
+        # A connection built by RelayManager from a target descriptor answers
+        # for that target. One built straight from a config file - the
+        # implicit connection, and every test that constructs RelayLogic
+        # itself - has no target to be keyed by, so it holds the session's
+        # "primary" slot. Fixed here and never re-keyed: consent that moves
+        # its key is consent that is lost (DESIGN_RELAY_CONSENT.md 6).
+        self._consent_keys = [str(config.get("relay_target_id") or "primary")]
+        self._consent: dict[str, dict] = {}
+        self._load_consent()
         # None preserves the legacy implicit-connection behavior (all local
         # topics + broad discovery). RelayManager sets an explicit set for
         # every registered target, including the empty set.
@@ -454,10 +490,27 @@ class RelayLogic:
         # reload - same identity+location fingerprint guard that keeps one
         # identity from inheriting stale bookkeeping across storages.
         pseudo_config = self._config_from_storage(storage)
-        self._state_path = self._configured_state_file or default_relay_state_file(
-            pseudo_config, self.identity,
+        previous_path = self._state_path
+        self._state_path = self._configured_state_file or self._default_state_path(
+            pseudo_config,
         )
+        if previous_path != self._state_path:
+            # The reload below already discards everything that file holds,
+            # so keeping it only leaves an orphan nothing will read: named
+            # for a location this connection no longer talks to, under a
+            # fingerprint no later start recomputes.
+            self._delete_state_file(previous_path)
         self._state = self._load_state()
+        # Consent is the session's and outlives the location. Before it moved
+        # there this reload dropped it, so a client that accepted topics
+        # before adopting its storage silently lost them.
+        self._project_consent()
+
+    def _default_state_path(self, storage_config: dict) -> str:
+        return default_relay_state_file(
+            {**storage_config, "relay_state_directory": self._state_directory},
+            self.identity,
+        )
 
     @staticmethod
     def _config_from_storage(storage) -> dict:
@@ -528,6 +581,119 @@ class RelayLogic:
             "poll_interval_seconds": self.poll_interval_seconds,
         }
 
+    # ---- consent -------------------------------------------------------
+    #
+    # Keyed by target, held by the session, mirrored here. A connection is
+    # one *location*; a target is one *link a user configured*, and two
+    # targets may name the same location (create_target does not dedup the
+    # way register_descriptor does), so a connection reads the union of every
+    # target it serves and writes to the one it was built for.
+
+    @staticmethod
+    def _empty_consent() -> dict:
+        return {"desired": [], "shared": [], "identity_topics": []}
+
+    def _stored_consent(self) -> dict:
+        return dict(
+            self.session.component_metadata("relay").get("relay_consent") or {}
+        )
+
+    def _load_consent(self) -> None:
+        stored = self._stored_consent()
+        self._consent = {}
+        for key in self._consent_keys:
+            entry = stored.get(key) or {}
+            self._consent[key] = {
+                "desired": sorted({str(t) for t in entry.get("desired") or []}),
+                "shared": sorted({str(t) for t in entry.get("shared") or []}),
+                "identity_topics": sorted(
+                    {str(t) for t in entry.get("identity_topics") or []}
+                ),
+            }
+        self._project_consent()
+
+    def _project_consent(self) -> None:
+        """Union every served target's consent into the read path.
+
+        poll_and_apply and has_active_relationship read `self._state`, and go
+        on doing so - the session is the record, not the hot path.
+        """
+        for key in CONSENT_KEYS:
+            merged: set[str] = set()
+            for entry in self._consent.values():
+                merged.update(entry[key])
+            self._state[key] = sorted(merged)
+        self._project_pairing()
+
+    def _project_pairing(self) -> None:
+        """Does any target this connection serves carry a sibling pairing?
+
+        Read from the target records rather than held per connection: a
+        connection is a location and the pairing is a property of the link,
+        and the same three readers - relay_topic_uuids, the poll's scoping,
+        and withdraw_topic_publication's refusal - ask the same question.
+        """
+        targets = self.session.component_metadata("relay").get("relay_targets") or {}
+        self._state["pair_all_topics"] = any(
+            bool((targets.get(key) or {}).get("pair_all_topics"))
+            for key in self._consent_keys
+        )
+
+    def _write_consent(self) -> None:
+        # Read-modify-write under the session lock: several connections share
+        # one map, and update_component_metadata replaces the key whole.
+        with self._session_lock:
+            stored = self._stored_consent()
+            for key, entry in self._consent.items():
+                stored[key] = dict(entry)
+            self.session.update_component_metadata(
+                "relay", {"relay_consent": stored},
+            )
+        self._project_consent()
+
+    def _own_consent(self) -> dict:
+        """The served target this connection's own decisions are written to."""
+        return self._consent.setdefault(
+            self._consent_keys[0], self._empty_consent(),
+        )
+
+    def _add_consent(self, key: str, topic_uuids: list[str]) -> None:
+        entry = self._own_consent()
+        entry[key] = sorted(set(entry[key]) | {str(u) for u in topic_uuids})
+
+    def _remove_consent(self, key: str, topic_uuids: list[str]) -> None:
+        # From every target this connection serves, not only the one it
+        # writes to: the caller is saying this connection must stop carrying
+        # the topic, and a second target naming the same location would
+        # otherwise keep it in the union.
+        remove = {str(u) for u in topic_uuids}
+        for entry in self._consent.values():
+            entry[key] = [t for t in entry[key] if t not in remove]
+
+    def serve_target(self, target_id: str) -> None:
+        """Also answer for this target, when two of them name one location."""
+        if not target_id or target_id in self._consent_keys:
+            return
+        self._consent_keys.append(target_id)
+        self._load_consent()
+        self._project_pairing()
+
+    def forget_target(self, target_id: str) -> None:
+        """Drop a deleted target's consent, from memory and from the session."""
+        with self._session_lock:
+            stored = self._stored_consent()
+            if stored.pop(target_id, None) is not None:
+                self.session.update_component_metadata(
+                    "relay", {"relay_consent": stored},
+                )
+        if target_id in self._consent_keys and len(self._consent_keys) > 1:
+            self._consent_keys.remove(target_id)
+        self._consent.pop(target_id, None)
+        if not self._consent:
+            self._consent[self._consent_keys[0]] = self._empty_consent()
+        self._project_consent()
+        self._project_pairing()
+
     @_relay_io_locked
     def mark_topics_desired(self, topic_uuids: list[str]) -> SessionResult:
         # Recording topic_uuids as "desired" is the consent step:
@@ -537,34 +703,41 @@ class RelayLogic:
         # be handed a token first, same as a live join.
         if not isinstance(topic_uuids, list) or not topic_uuids:
             return SessionResult("error", reason="no topic_uuids given")
-        desired = set(self._state.setdefault("desired", []))
-        desired.update(str(uuid) for uuid in topic_uuids)
-        self._state["desired"] = sorted(desired)
-        self._save_state()
+        self._add_consent("desired", topic_uuids)
+        self._write_consent()
         return SessionResult("ok", value=topic_uuids)
 
     @_relay_io_locked
     def unmark_topics_desired(self, topic_uuids: list[str]) -> SessionResult:
         if not isinstance(topic_uuids, list) or not topic_uuids:
             return SessionResult("error", reason="no topic_uuids given")
-        remove = {str(uuid) for uuid in topic_uuids}
-        self._state["desired"] = [
-            topic for topic in self._state.get("desired", []) if topic not in remove
-        ]
-        self._save_state()
-        return SessionResult("ok", value=sorted(remove))
+        self._remove_consent("desired", topic_uuids)
+        self._write_consent()
+        return SessionResult("ok", value=sorted({str(u) for u in topic_uuids}))
 
-    @_relay_io_locked
     def pair_all_topics(self) -> SessionResult:
         """Publish everything this account owns over this connection.
 
-        Durable intent, like `shared` and `desired`, so it survives a restart
-        and is not undone by refresh_scopes recomputing target assignments -
-        pairing is not an assignment, and there is no target to assign to.
+        Recorded on the target, which is what the link is: it survives a
+        restart, it is not undone by refresh_scopes recomputing assignments -
+        pairing is not an assignment - and it is edited with the target
+        rather than beside it.
         """
-        self._state["pair_all_topics"] = True
-        self._save_state()
-        return SessionResult("ok", value=True)
+        # Deliberately not @_relay_io_locked: the registry this writes to is
+        # the manager's, and manager < relay I/O. Taking the I/O lock here
+        # and the manager's inside it is the inversion the order forbids.
+        if self._manager is None:
+            return SessionResult(
+                "error", reason="a relay target is required to pair over",
+            )
+        return self._manager.mark_target_pairs_all(self)
+
+    @_relay_io_locked
+    def refresh_pairing(self) -> None:
+        self._project_pairing()
+
+    def served_targets(self) -> list[str]:
+        return list(self._consent_keys)
 
     @_relay_io_locked
     def mark_topics_shared(self, topic_uuids: list[str]) -> SessionResult:
@@ -578,10 +751,8 @@ class RelayLogic:
         # publish_due_topics writes; only whether the loop runs at all.
         if not isinstance(topic_uuids, list) or not topic_uuids:
             return SessionResult("error", reason="no topic_uuids given")
-        shared = set(self._state.setdefault("shared", []))
-        shared.update(str(uuid) for uuid in topic_uuids)
-        self._state["shared"] = sorted(shared)
-        self._save_state()
+        self._add_consent("shared", topic_uuids)
+        self._write_consent()
         self._activate_shared_topics()
         return SessionResult("ok", value=topic_uuids)
 
@@ -593,13 +764,9 @@ class RelayLogic:
         # had ever been shared.
         if not isinstance(topic_uuids, list) or not topic_uuids:
             return SessionResult("error", reason="no topic_uuids given")
-        remove = {str(uuid) for uuid in topic_uuids}
-        self._state["shared"] = [
-            topic for topic in self._state.get("shared", [])
-            if topic not in remove
-        ]
-        self._save_state()
-        return SessionResult("ok", value=sorted(remove))
+        self._remove_consent("shared", topic_uuids)
+        self._write_consent()
+        return SessionResult("ok", value=sorted({str(u) for u in topic_uuids}))
 
     def _activate_shared_topics(self) -> None:
         # Relay token issuance is the relay equivalent of a direct join: the
@@ -680,7 +847,7 @@ class RelayLogic:
             "poll_interval_seconds": self.poll_interval_seconds,
             # Presence is per relay identity, but reachability is per topic.
             # Without this, using the same relay for identity traffic or a
-            # different board makes a peer appear online for a board this
+            # different topic makes a peer appear online for a topic this
             # connection no longer carries.
             "topic_uuids": self.relay_topic_uuids(),
         }
@@ -1284,6 +1451,59 @@ class RelayLogic:
             changed=bool(getattr(result, "value", False)),
         )
 
+    def _resume_publication_seq(self, topic_uuid: str) -> None:
+        """Pick the counter back up from our own head, when the file is gone.
+
+        Everything else in the state file may be lost and re-derived, but a
+        generation number must never be reused: a peer holding 7 sees a 1,
+        `publication_seq > previous_received_seq` is false, and its
+        acknowledgement stops for good - silently, with nothing wrong at
+        either end. So the counter is read back from the head we ourselves
+        published, which carries it.
+
+        Only when there was no file to load, and only once per topic. An
+        ordinary restart has its counters and pays nothing; a first start, or
+        one after the file was deleted, pays one read per topic it publishes
+        and then never again. A topic the relay has never held answers None,
+        which is recorded as a zero so the question is not asked twice.
+        """
+        if not self._cache_was_absent or self.storage is None:
+            return
+        if topic_uuid in self._state.setdefault("publication_seq", {}):
+            return
+        try:
+            head = self.storage.read_head(topic_uuid, self.identity)
+        except Exception as error:  # noqa: BLE001 - an unreachable relay is
+            # not evidence of anything. Leave the topic unanswered so the
+            # next cycle asks again rather than resuming from a guess.
+            self.session.trace_event(
+                "relay.publication_seq_resume_failed",
+                relay_identity=self.identity,
+                topic_uuid=topic_uuid,
+                reason=str(error)[:200],
+            )
+            return
+        published = self._valid_seq((head or {}).get("publication_seq"))
+        acknowledged = self._valid_seq((head or {}).get("ack_publication_seq"))
+        self._state["publication_seq"][topic_uuid] = published
+        self._state.setdefault("ack_publication_seq", {})[topic_uuid] = min(
+            acknowledged, published,
+        )
+        if published:
+            self.session.trace_event(
+                "relay.publication_seq_resumed",
+                relay_identity=self.identity,
+                topic_uuid=topic_uuid,
+                publication_seq=published,
+                ack_publication_seq=min(acknowledged, published),
+            )
+
+    @staticmethod
+    def _valid_seq(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
     def _relay_holds_our_publication(
         self, topic_uuid: str, peer_listings: dict[str, list[str]] | None = None,
     ) -> bool:
@@ -1391,6 +1611,7 @@ class RelayLogic:
             content_changed = (
                 self._state["published"].get(topic_uuid) != current_hash
             )
+            self._resume_publication_seq(topic_uuid)
             publication_seq = int(
                 self._state.setdefault("publication_seq", {}).get(
                     topic_uuid, 0,
@@ -2131,16 +2352,17 @@ class RelayLogic:
             return SessionResult("error", reason="relay not configured")
         self.storage.delete_topic(topic_uuid)
         self._forget_topic_bookkeeping(topic_uuid)
-        self._state["desired"] = [t for t in self._state.get("desired", []) if t != topic_uuid]
-        self._state["identity_topics"] = [
-            t for t in self._state.get("identity_topics", []) if t != topic_uuid
-        ]
-        self._state["shared"] = [t for t in self._state.get("shared", []) if t != topic_uuid]
+        for key in ("desired", "identity_topics", "shared"):
+            self._remove_consent(key, [topic_uuid])
+        self._write_consent()
         self._save_state()
         return SessionResult("ok", value=topic_uuid)
 
     def _load_state(self) -> dict[str, Any]:
         path = Path(self._state_path)
+        # Whether the counters have to be recovered from the relay before the
+        # next publication - see _resume_publication_seq.
+        self._cache_was_absent = not path.is_file()
         if path.is_file():
             with path.open(encoding="utf-8") as f:
                 data = json.load(f)
@@ -2152,9 +2374,8 @@ class RelayLogic:
             data.setdefault("received_publications", {})
             data.setdefault("observed_publications", {})
             data.setdefault("peer_observed_publications", {})
-            data.setdefault("desired", [])
-            data.setdefault("identity_topics", [])
-            data.setdefault("shared", [])
+            for key in CONSENT_KEYS + PROJECTED_KEYS:
+                data.pop(key, None)
             # `applied` is deliberately NOT restored (see _save_state) - it
             # always starts empty so a restart re-fetches and re-caches
             # every peer's content.
@@ -2165,8 +2386,7 @@ class RelayLogic:
             "publication_seq": {}, "ack_publication_seq": {},
             "received_publications": {},
             "observed_publications": {}, "peer_observed_publications": {},
-            "applied": {}, "desired": [], "identity_topics": [], "shared": [],
-            "pair_all_topics": False,
+            "applied": {},
         }
 
     def _save_state(self) -> None:
@@ -2186,7 +2406,12 @@ class RelayLogic:
         # falsifies it. It is kept only as a cheap first check now:
         # _relay_holds_our_publication asks the relay before the skip is
         # honoured, so nothing rests on the local record alone.
-        # `desired`/`shared` persist (durable consent/intent).
+        # Consent - `desired`, `shared`, `identity_topics`,
+        # `pair_all_topics` - is not here at all. It is the one thing in this
+        # bookkeeping the relay cannot re-answer, so it lives with the
+        # session and is keyed by target rather than by location
+        # (DESIGN_RELAY_CONSENT.md). What is left is cache: losing this whole
+        # file costs a republish and a refetch, nothing else.
         # Same lesson as not persisting Session.peer_sync_state.
         path = Path(self._state_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2197,7 +2422,10 @@ class RelayLogic:
             # Copy while holding the writer lock so JSON serialization does
             # not follow nested dictionaries that another save is replacing.
             persisted = copy.deepcopy({
-                key: value for key, value in self._state.items() if key != "applied"
+                key: value for key, value in self._state.items()
+                if key != "applied"
+                and key not in CONSENT_KEYS
+                and key not in PROJECTED_KEYS
             })
             tmp_path = path.with_name(
                 f"{path.name}.{os.getpid()}.{uuid_mod.uuid4().hex}.tmp"
@@ -2229,6 +2457,39 @@ class RelayLogic:
                         tmp_path.unlink()
                     except OSError:
                         pass
+
+    def _delete_state_file(self, path: str | None = None) -> None:
+        """Drop a state file whose connection is gone.
+
+        Nothing reads one of these back once its connection has been retired
+        or re-keyed to another location: the name carries an identity and a
+        storage fingerprint, and neither is recomputed the same way again.
+        Left in place they accumulate one file per connection ever retired -
+        found live as a data/ directory holding dozens of all-empty state
+        files, none of them attributable to anything still configured.
+        """
+        target = Path(path or self._state_path)
+        absolute_path = str(target.resolve())
+        with _STATE_SAVE_LOCKS_GUARD:
+            save_lock = _STATE_SAVE_LOCKS.setdefault(absolute_path, threading.Lock())
+        # The same lock a save takes, so a delete cannot land between another
+        # writer's temporary file and its replace.
+        with save_lock:
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                # Windows hands out sharing violations for a file a scanner,
+                # indexer, or another process still holds open. An orphan
+                # left behind is untidy, not wrong, so this never fails the
+                # retire it is part of - but it is worth a line.
+                self.session.trace_event(
+                    "relay.state_file_delete_failed",
+                    relay_identity=self.identity,
+                    path=str(target),
+                    reason=str(error)[:200],
+                )
 
 
 def _relay_fingerprint(storage) -> str:
@@ -2350,21 +2611,15 @@ class RelayManager:
         }
 
     def _bootstrap_registry(self) -> None:
+        """Adopt a relay named in the config file as a target, once.
+
+        Once, not on every start: a target the user deleted must stay
+        deleted, and the config file that named it does not know that.
+        """
         registry = self._target_registry()
-        # Older versions marked the target imported from JSON as protected.
-        # Targets are now owned by the persisted registry, including migrated
-        # ones, so every target can be edited and deleted in the UI.
-        changed = False
-        for record in registry.values():
-            if "configured" in record:
-                record.pop("configured", None)
-                changed = True
         if self._startup_target_migrated:
-            if changed:
-                self._persist_configuration()
             return
         self._startup_target_migrated = True
-        changed = True
         if not self.primary.storage:
             self._persist_configuration()
             return
@@ -2387,20 +2642,7 @@ class RelayManager:
             registry[target_id] = self._record_from_descriptor(
                 descriptor, "Imported relay",
             )
-            changed = True
-        # Migrate durable relay intent to explicit assignments. New topics
-        # remain unassigned, as required by the explicit-target model.
-        mapping = self._topic_target_map()
-        for topic_uuid in set(self.primary._state.get("shared", [])) | set(
-            self.primary._state.get("desired", [])
-        ):
-            node = self.session.get_node(topic_uuid)
-            if node and self.session.supports_shared_topic(node):
-                if topic_uuid not in mapping:
-                    mapping[topic_uuid] = target_id
-                    changed = True
-        if changed:
-            self._persist_configuration()
+        self._persist_configuration()
 
     @_manager_locked
     def list_targets(self) -> list[dict]:
@@ -2449,11 +2691,19 @@ class RelayManager:
                     if previous_storage and previous_storage is not storage:
                         previous_storage.close()
                 existing.adopt_poll_interval_from_descriptor(descriptor or {})
+                existing.serve_target(str((descriptor or {}).get("target_id") or ""))
                 return existing
             record = self._record_from_descriptor(descriptor or {})
             connection_config = {
                 "app_module": self.config.get("app_module"),
-                "relay_identity": self.config.get("relay_identity") or self.session.identity.uuid,
+                "relay_target_id": (descriptor or {}).get("target_id"),
+                "relay_identity": (
+                    self.config.get("relay_identity")
+                    or self.session.component_metadata("relay").get(
+                        "relay_paired_client_id",
+                    )
+                    or self.session.identity.uuid
+                ),
                 "relay_poll_interval_seconds": record.get("poll_interval_seconds", 3),
                 "relay_blob_lease_seconds": self.config.get("relay_blob_lease_seconds", 300),
             }
@@ -2470,12 +2720,12 @@ class RelayManager:
                 value = record.get(name, self.config.get(name))
                 if value is not None:
                     connection_config[name] = value
-            state_directory = self.config.get("relay_state_directory")
-            if state_directory:
-                safe_fingerprint = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12]
-                connection_config["relay_state_file"] = str(
-                    Path(state_directory) / f"relay-{safe_fingerprint}.json"
-                )
+            # Named, not placed: default_relay_state_file derives the same
+            # relay-<fingerprint>.json from the location this connection is
+            # about to build, so the directory only has to be handed over.
+            connection_config["relay_state_directory"] = self.config.get(
+                "relay_state_directory",
+            )
             if record.get("backend") == "sftp":
                 connection_config.update({
                     "relay_backend": "sftp",
@@ -2617,20 +2867,16 @@ class RelayManager:
             old_connection = (
                 self.connections.get(old_fingerprint) if old_fingerprint else None
             )
-            assigned_topics = {
-                topic_uuid for topic_uuid, assigned in self._topic_target_map().items()
-                if assigned == target_id
-            }
-            old_intent = {"shared": set(), "desired": set(), "identity_topics": set()}
-            if old_connection:
-                with old_connection._io_lock:
-                    for key in old_intent:
-                        old_intent[key] = set(old_connection._state.get(key, []))
-
             registry[target_id] = self._record_from_descriptor(
                 descriptor,
                 str(values.get("name") or current_record.get("name") or "Relay target").strip(),
             )
+            # A descriptor describes a location, so rebuilding the record from
+            # one drops anything the record knows that the location does not.
+            # Pairing is exactly that: whether this link carries a sibling
+            # does not change because its host was corrected.
+            if current_record.get("pair_all_topics"):
+                registry[target_id]["pair_all_topics"] = True
             new_connection = self.ensure_connection(self.target_descriptor(target_id))
             if not new_connection:
                 registry[target_id] = current_record
@@ -2638,6 +2884,12 @@ class RelayManager:
 
             new_fingerprint = _relay_fingerprint(new_connection.storage)
             if old_connection and old_connection is not new_connection:
+                # Nothing to carry across. Consent is keyed by this target's
+                # id and an edit does not change it, so the new connection
+                # loads what the old one answered for. Moving it by hand -
+                # forty-five lines of it, intersected with the topics
+                # assigned here whenever another target still named the old
+                # location - is what keying consent by location cost.
                 other_old_reference = any(
                     item_id != target_id
                     and _relay_fingerprint(RelayLogic._storage_from_descriptor(
@@ -2645,28 +2897,6 @@ class RelayManager:
                     )) == old_fingerprint
                     for item_id, item in registry.items()
                 )
-                if other_old_reference:
-                    shared = old_intent["shared"] & assigned_topics
-                    desired = old_intent["desired"] & assigned_topics
-                    identity_topics = old_intent["identity_topics"]
-                    if shared:
-                        old_connection.unmark_topics_shared(sorted(shared))
-                    if desired:
-                        old_connection.unmark_topics_desired(sorted(desired))
-                else:
-                    shared = old_intent["shared"]
-                    desired = old_intent["desired"]
-                    identity_topics = old_intent["identity_topics"]
-                if shared:
-                    new_connection.mark_topics_shared(sorted(shared))
-                if desired:
-                    new_connection.mark_topics_desired(sorted(desired))
-                if identity_topics:
-                    with new_connection._io_lock:
-                        merged = set(new_connection._state.get("identity_topics", []))
-                        merged.update(identity_topics)
-                        new_connection._state["identity_topics"] = sorted(merged)
-                        new_connection._save_state()
                 if not other_old_reference:
                     self._retire_connection(old_fingerprint, old_connection)
             self.connections[new_fingerprint] = new_connection
@@ -2691,7 +2921,10 @@ class RelayManager:
         is_first_target = not self._target_registry()
         target_id = str(uuid_mod.uuid4())
         self._target_registry()[target_id] = self._record_from_descriptor(descriptor)
-        connection = self.ensure_connection(descriptor)
+        # Through the target, not the raw descriptor: only target_descriptor
+        # carries the id, and a connection that does not learn its id writes
+        # its consent to the primary slot instead.
+        connection = self.ensure_connection(self.target_descriptor(target_id))
         if is_first_target:
             identity_uuid = self.session.identity.uuid
             self._topic_target_map()[identity_uuid] = target_id
@@ -2860,7 +3093,11 @@ class RelayManager:
             connection._state["shared"] = []
             connection._state["desired"] = []
             connection._state["identity_topics"] = []
-            connection._save_state()
+            # Cleared in memory because the object outlives the connection -
+            # it stays on as the unconfigured primary - but not on disk:
+            # persisting the emptied state is what left one all-empty file
+            # behind for every connection this client ever retired.
+            connection._delete_state_file()
             storage = connection.storage
             if storage:
                 storage.close()
@@ -2902,11 +3139,48 @@ class RelayManager:
             ) == fingerprint
             for item in registry.values()
         ) if fingerprint else False
+        if connection:
+            connection.forget_target(target_id)
         if connection and not remaining_same_connection:
             self._retire_connection(fingerprint, connection)
         self.refresh_scopes()
         self._persist_configuration()
         return SessionResult("ok", value=target_id)
+
+    def _refile_primary(self) -> None:
+        """File primary under the location it just adopted.
+
+        It is registered as "unconfigured" while it has no storage, and
+        nothing re-keyed it afterwards - so a lookup by fingerprint missed it
+        and would build a second connection to the relay it had just taken:
+        two writers, one machine, one slot.
+        """
+        with self._manager_lock:
+            fingerprint = _relay_fingerprint(self.primary.storage)
+            if fingerprint == self._primary_fingerprint:
+                return
+            if self.connections.get(self._primary_fingerprint) is self.primary:
+                self.connections.pop(self._primary_fingerprint, None)
+            self._primary_fingerprint = fingerprint
+            self.connections[fingerprint] = self.primary
+
+    def mark_target_pairs_all(self, connection: RelayLogic) -> SessionResult:
+        """Record that every target this connection serves carries a sibling."""
+        with self._manager_lock:
+            registry = self._target_registry()
+            marked = [
+                target_id for target_id in connection.served_targets()
+                if target_id in registry
+            ]
+            if not marked:
+                return SessionResult(
+                    "error", reason="a relay target is required to pair over",
+                )
+            for target_id in marked:
+                registry[target_id]["pair_all_topics"] = True
+            self._persist_configuration()
+        connection.refresh_pairing()
+        return SessionResult("ok", value=True)
 
     def all_connections(self) -> list[RelayLogic]:
         with self._manager_lock:
@@ -3049,20 +3323,30 @@ class RelayManager:
         topic_uuids = [
             str(item) for item in (token.get("topic_uuids") or []) if item
         ]
-        # Identity before storage: the state file is keyed by identity and
-        # location together, so binding storage under the old identity would
-        # tie this client's bookkeeping to a slot it is about to leave. Set
-        # once, before any connection is created, because a connection built
-        # after this point reads it from app_metadata as its own identity.
-        self.session.update_component_metadata("relay", {
-            "relay_paired_client_id": client_id,
-        })
         for descriptor in descriptors:
             accepted = self._adopt_pairing_channel(
                 descriptor, client_id, topic_uuids,
             )
             if accepted.status != "ok":
                 return accepted
+        # After the channels, not before them. This once had to run first,
+        # on the grounds that a connection built later would read its own
+        # identity from here and that the state file was keyed by identity -
+        # neither holds. _adopt_pairing_channel assigns `connection.identity`
+        # outright, and every connection the manager builds is handed an
+        # explicit `relay_identity`, so nothing in this path consults the
+        # metadata at all. What it is for is the *next* start, where there is
+        # no token to read: publishing under this session's own uuid would
+        # make a paired client a peer of its siblings rather than one of them
+        # (DESIGN_MULTI_CLIENT_PAIRING.md). The state file that supplied the
+        # other half of the old reason holds cache now
+        # (DESIGN_RELAY_CONSENT.md).
+        #
+        # Written last so a token whose relay cannot be opened leaves no
+        # record of a pairing that never bound to anything.
+        self.session.update_component_metadata("relay", {
+            "relay_paired_client_id": client_id,
+        })
         self.session.trace_event(
             "relay.pairing_token_accepted",
             client_id=client_id,
@@ -3115,9 +3399,21 @@ class RelayManager:
             return SessionResult(
                 "error", reason="could not open the relay named in the token",
             )
+        if connection is self.primary:
+            self._refile_primary()
+        # Only now, with the storage installed and the connection filed under
+        # its fingerprint, does registering the descriptor find *this*
+        # connection instead of building a second one. It is what gives a
+        # paired channel a target record - which is where the pairing itself
+        # is kept - and hands this connection the id through serve_target.
+        registered = self.register_descriptor(descriptor)
+        if registered.status != "ok":
+            return registered
         if topic_uuids:
             connection.mark_topics_desired(topic_uuids)
-        connection.pair_all_topics()
+        paired = connection.pair_all_topics()
+        if paired.status != "ok":
+            return paired
         return SessionResult("ok", value=connection.identity)
 
     # ---- sibling alarms ------------------------------------------------

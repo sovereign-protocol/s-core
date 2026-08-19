@@ -562,5 +562,66 @@ class ForgetsPeersTheRelayNoLongerListsTests(unittest.TestCase):
             )
 
 
+class SequenceComesFromTheRelayTests(unittest.TestCase):
+    """The same principle, applied to the one counter that cannot restart.
+
+    A publication generation must never be reused: a peer holding 7 sees a 1,
+    `publication_seq > previous_received_seq` is false, and acknowledgement
+    stops with nothing visibly wrong. The counter lives in the state file,
+    which is cache and may be deleted - so when it is gone, the number is read
+    back from the head we published, not begun again at zero.
+    """
+
+    def publish(self, session, relay_root, state_dir, topic_uuid):
+        relay = RelayLogic(session, relay_config(relay_root, "A", state_dir))
+        relay.set_scoped_topics({topic_uuid})
+        relay.publish_due_topics()
+        return relay
+
+    def test_a_deleted_state_file_resumes_the_sequence_from_the_relay(self):
+        with tempfile.TemporaryDirectory() as relay_root,                 tempfile.TemporaryDirectory() as state_dir:
+            session = Session("addr-a")
+            topic = register_topic(session, "plan")
+            relay = self.publish(session, relay_root, state_dir, topic.uuid)
+            session.create_child(
+                topic.uuid, {"type": "note", "name": "n", "text": "one"}, {},
+            )
+            relay.publish_due_topics()
+            reached = relay._state["publication_seq"][topic.uuid]
+            self.assertGreater(reached, 1)
+
+            Path(relay._state_path).unlink()
+            session.create_child(
+                topic.uuid, {"type": "note", "name": "m", "text": "two"}, {},
+            )
+            rebuilt = self.publish(session, relay_root, state_dir, topic.uuid)
+
+            self.assertGreater(
+                rebuilt._state["publication_seq"][topic.uuid], reached,
+            )
+
+    def test_a_topic_the_relay_never_held_starts_at_one(self):
+        with tempfile.TemporaryDirectory() as relay_root,                 tempfile.TemporaryDirectory() as state_dir:
+            session = Session("addr-a")
+            topic = register_topic(session, "plan")
+
+            relay = self.publish(session, relay_root, state_dir, topic.uuid)
+
+            self.assertEqual(relay._state["publication_seq"][topic.uuid], 1)
+
+    def test_an_ordinary_restart_asks_the_relay_nothing(self):
+        # The read is the price of a missing file, not of starting up.
+        with tempfile.TemporaryDirectory() as relay_root,                 tempfile.TemporaryDirectory() as state_dir:
+            session = Session("addr-a")
+            topic = register_topic(session, "plan")
+            self.publish(session, relay_root, state_dir, topic.uuid)
+
+            restarted = RelayLogic(
+                session, relay_config(relay_root, "A", state_dir),
+            )
+
+            self.assertFalse(restarted._cache_was_absent)
+
+
 if __name__ == "__main__":
     unittest.main()

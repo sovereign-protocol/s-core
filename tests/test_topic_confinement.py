@@ -22,7 +22,7 @@ class TopicConfinementTests(unittest.TestCase):
 
         root = victim.protocol.root.uuid
         board = victim.create_child(
-            root, {"type": "kanban_board", "name": "Board"}, {},
+            root, {"type": "initiative", "name": "Initiative"}, {},
         ).value
         private = victim.create_child(
             root, {"type": "team", "name": "Private"}, {},
@@ -130,7 +130,7 @@ class TopicConfinementTests(unittest.TestCase):
         """Confinement must not cost the normal case anything."""
         peer = Session("si-b")
         topic = peer.create_child(
-            peer.protocol.root.uuid, {"type": "kanban_board", "name": "b"}, {},
+            peer.protocol.root.uuid, {"type": "initiative", "name": "b"}, {},
         ).value
         card = peer.create_child(
             topic.uuid, {"type": "kanban_card", "name": "original"}, {},

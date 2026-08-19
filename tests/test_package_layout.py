@@ -402,6 +402,32 @@ class ShellLayoutTests(unittest.TestCase):
             "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)", bar,
         )
 
+    def test_an_object_is_drawn_from_its_kind_and_nothing_else(self):
+        """The caller names the object; Core owns the drawing (U8).
+
+        `entityBadge` took an `icon` argument, and S-Team passed a key emoji
+        for a trusteeship, an open diamond for a role and a filled one for a
+        membership - three drawings chosen at three call sites for objects
+        Core already had names for. The argument is gone: one object has one
+        glyph because there is nowhere else for a second one to come from.
+        """
+        badge = SHARED_JS.split("entityBadge(options = {}) {", 1)[1].split(
+            "\n  disclosure(", 1,
+        )[0]
+        self.assertIn("entityGlyph(kind)", badge)
+        self.assertNotIn("options.icon", badge)
+        # Role, Seat and Members are the distinction S-Team's domain turns
+        # on - an office, that office filled, and people irrespective of
+        # office - so they are three drawings, not one.
+        for kind in ("team", "role", "seat", "trustee", "membership"):
+            self.assertIn(f"{kind}: ICON_", SHARED_JS)
+        # A section may carry the mark of the kind it holds, from the same
+        # table, so a heading and its contents cannot diverge.
+        disclosure = SHARED_JS.split("disclosure(title, options = {}) {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("options.glyph ? entityGlyph(options.glyph) : null", disclosure)
+
     def test_the_name_clears_the_shared_field_min_height(self):
         """`.ui-editable-text` floors at 34px, and min-height beats height.
 

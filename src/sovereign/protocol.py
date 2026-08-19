@@ -463,7 +463,7 @@ class ProtocolState:
         # only moves ancestors' subtree (state) hash - their own content_hash
         # is unchanged - and it never touches any base_hash: base advances
         # solely via _begin_revision on the directly edited node. This is why
-        # a card edit no longer manufactures a revision of its column/board.
+        # a card edit no longer manufactures a revision of its column or root.
         current_uuid = node_uuid
         while current_uuid:
             node = self.index.get(current_uuid)

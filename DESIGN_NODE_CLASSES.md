@@ -303,7 +303,7 @@ is a topic with a membership of its own.
 
 | Node type | M | S | Class | Storage |
 |---|---|---|---|---|
-| `kanban_board` | yes | yes | **decidable** | - |
+| `initiative`    | yes | yes | **decidable** | - |
 | `kanban_column` | yes | yes | **decidable** | - |
 | `kanban_card` | yes | yes | **decidable** | - |
 | `card_comment` | no (author) | no | observed | persisted |

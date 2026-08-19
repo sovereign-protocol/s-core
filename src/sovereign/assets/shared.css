@@ -307,8 +307,16 @@ button.ui-entity-badge:not(:disabled):focus-visible {
 .ui-entity-badge[data-entity-kind="team"] {
   background: rgba(59, 130, 246, 0.1);
 }
-.ui-entity-badge[data-entity-kind="role"] {
+/* A role, that role held, and the trusteeship that is a role of its own all
+   tint alike: they are one family of thing, and what separates them is the
+   glyph, not the surface. */
+.ui-entity-badge[data-entity-kind="role"],
+.ui-entity-badge[data-entity-kind="seat"],
+.ui-entity-badge[data-entity-kind="trustee"] {
   background: rgba(168, 85, 247, 0.1);
+}
+.ui-entity-badge[data-entity-kind="membership"] {
+  background: rgba(45, 212, 191, 0.1);
 }
 .ui-entity-badge[data-status="accepted"] { border-color: rgba(34, 197, 94, 0.6); }
 .ui-entity-badge[data-status="pending"],
@@ -336,8 +344,16 @@ button.ui-entity-badge:not(:disabled):focus-visible {
   width: 18px;
   height: 18px;
   color: var(--text-muted, var(--shell-muted, currentColor));
-  font-size: 14px;
 }
+.ui-entity-icon .icon-svg { width: 15px; height: 15px; }
+/* The same mark on the section that names the kind, one step quieter than
+   its own heading so it introduces the row rather than competing with it. */
+.ui-disclosure-toggle .ui-entity-icon {
+  order: -1;
+  width: 16px;
+  height: 16px;
+}
+.ui-disclosure-toggle .ui-entity-icon .icon-svg { width: 14px; height: 14px; }
 .ui-entity-badge-actions,
 .ui-entity-action { opacity: 0; transition: opacity 0.12s ease; }
 .ui-entity-badge:hover .ui-entity-badge-actions,
@@ -671,7 +687,7 @@ dialog menu .danger:not(:last-child) {
 
    The shell styles itself completely rather than inheriting each page's
    palette. Inheriting looked tidy but guaranteed divergence: the same relay
-   dialog rendered three different ways, because Kanban styles `input`,
+   dialog rendered three different ways, because S-Initiative styles `input`,
    S-Cockpit styles `dialog input`, and a minimal application styles
    neither and falls through to browser defaults. Core owns this
    functionality, so Core owns its appearance.

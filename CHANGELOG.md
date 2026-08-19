@@ -2,6 +2,83 @@
 
 ## 0.1.9
 
+- **The shell's agenda count follows the Cockpit's renamed tile family.** The
+  optimistic update read `draft.boards`; that key is `draft.initiatives` now.
+  Nothing else in Core named it, and the comments that described a topic as "a
+  board" now say topic or initiative — Core does not own either noun.
+
+- **An object is drawn from its kind, and from nothing else.**
+  `ENTITY_GLYPHS` maps an entity kind to its paths; `entityBadge({kind})`
+  reads the drawing from there, `SovereignUI.entityGlyph(kind)` exposes the
+  same table to a surface that draws its own row, and `disclosure` takes a
+  `glyph` kind so a section carries the mark of what it holds. `entityBadge`
+  no longer takes an `icon`: S-Team was passing a key emoji for a
+  trusteeship, an open diamond for a role and a filled one for a membership —
+  three drawings chosen at three call sites, for objects Core already had
+  names for, all three under one kind. See `DESIGN_UI_CONSISTENCY.md` U8.
+
+- **A pairing is a property of the link, and a generation number is not guesswork.**
+  `pair_all_topics` moved from the consent map to the target record, which is
+  what it always described: only pairing sets it, nothing clears it, and it
+  says that this link carries a sibling. It is projected onto the connection
+  for its three readers and written nowhere else, and an edit to a target
+  carries it across - a corrected host does not unpair a link.
+
+  Giving a paired channel a target record to hold it needed `_refile_primary`:
+  a connection is keyed by storage fingerprint, primary is filed as
+  "unconfigured" while it has none, and nothing re-filed it when it adopted
+  one - so registering the descriptor would have missed primary and built a
+  second writer to the slot it had just taken.
+
+  And `publish_due_topics` now recovers `publication_seq` from the head it
+  published, when there was no state file to load. Starting again at zero left
+  every peer holding a higher number ignoring the acknowledgement for good.
+  Gated so an ordinary restart asks the relay nothing; a first start or a
+  deleted file pays one read per topic, once. The state file may now be
+  deleted at any time with no consequence beyond a republish and a refetch.
+
+- **A paired client records the pairing once it has one.**
+  `accept_pairing_token` wrote `relay_paired_client_id` before binding any
+  channel, so a token naming a relay the client could not open left the session
+  claiming a pairing that reached nothing. It is written after the channels
+  now. The ordering was justified by the state file being keyed by identity,
+  and by connections reading their identity from that metadata; neither holds -
+  the file is cache, and `_adopt_pairing_channel` sets `connection.identity`
+  outright. Every connection `RelayManager` builds now resolves its identity
+  the way `RelayLogic` does, honouring the paired client id instead of falling
+  through to this session's uuid, which is what made the second half true.
+
+- **Where a topic syncs and whether it syncs are both the session's now.**
+  `desired`, `shared`, `identity_topics` and `pair_all_topics` moved out of the
+  relay state file into the session's private relay metadata, keyed by target
+  id rather than by identity and storage location. The state file holds cache
+  only and may be deleted at any time; the worst it costs is a republish and a
+  refetch. Deleting one used to empty the consent it held, which unarmed
+  publishing and stopped inbound grafting with no error anywhere and a
+  perfectly healthy-looking connection.
+
+  Three things went with it, none of them ported: `update_target`'s
+  forty-five-line hand-carry of intent from the old connection to the new one,
+  which existed only because consent was keyed by location; the one-time
+  migration that read intent out of the state file to seed topic-to-target
+  assignments; and the legacy `configured` key stripped from older target
+  records. A connection reads the union of consent across every target it
+  serves, since two targets may name one relay, and writes to the one it was
+  built for. See `DESIGN_RELAY_CONSENT.md`.
+
+- **A relay state file belongs to a connection, and does not outlive it.**
+  `relay_state_directory` now places the file for every connection an instance
+  makes, the implicit one built from the flat config included; it reached
+  connections built from a target only, so an instance that set it went on
+  writing into the shared `data/` beside its working directory anyway. A
+  retired connection now deletes its state file rather than persisting an
+  emptied copy of it, and a connection that re-keys to an adopted location
+  deletes the file its boot-time path left behind - the reload after a re-key
+  already discarded that file's contents, so keeping it only ever left
+  residue. Found live: a `data/` holding 48 relay state files, 46 of them
+  all-empty and none attributable to anything still configured - one per
+  connection ever retired, per location ever abandoned.
+
 - **An application says how its own topics are made, once.**
   `ApplicationRegistration` takes `topic_noun`, `template_required`,
   `list_templates` and `create_topic(title, template, snapshot)`; Core answers

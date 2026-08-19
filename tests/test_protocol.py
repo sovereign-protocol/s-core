@@ -323,7 +323,7 @@ class ProtocolTests(unittest.TestCase):
         state.create_child(second.uuid, {"name": "sibling"}, {})
         state.move_child(child.uuid, second.uuid)
 
-        # A reorder within the same parent (kanban does this on every
+        # A reorder within the same parent (S-Initiative does this on every
         # within-column drag) must not consume the real move history.
         state.move_child(child.uuid, second.uuid, 0)
 

@@ -287,9 +287,9 @@ class AppServerTests(unittest.TestCase):
         session.note_indirect_peer_topic("relay:B", topic.uuid)
         session.bind_peer_topic_channel("relay:B", topic.uuid, "mailbox")
         with session.lock:
-            session.application_metadata("kanban")["selected_board_uuid"] = (
-                "board-1"
-            )
+            session.application_metadata("initiative")[
+                "selected_initiative_uuid"
+            ] = "initiative-1"
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.json"
@@ -305,8 +305,10 @@ class AppServerTests(unittest.TestCase):
         )
         with loaded.lock:
             self.assertEqual(
-                loaded.application_metadata("kanban")["selected_board_uuid"],
-                "board-1",
+                loaded.application_metadata("initiative")[
+                    "selected_initiative_uuid"
+                ],
+                "initiative-1",
             )
 
 

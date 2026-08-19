@@ -544,6 +544,24 @@ class PairingTokenTests(unittest.TestCase):
                 ["start"],
             )
 
+    def test_a_pairing_that_cannot_open_its_relay_records_nothing(self):
+        # The client id used to be written before the channels were bound,
+        # so a token naming a relay this client cannot open left the session
+        # claiming a pairing that reached no channel at all.
+        with tempfile.TemporaryDirectory() as relay_root,                 tempfile.TemporaryDirectory() as state_dir:
+            desktop = self.runtime(8829, "desktop", state_dir, relay_root)
+            token = dict(desktop.collaboration.compose_pairing_token().value)
+            token["channels"] = [{"type": "nonsense", "root": relay_root}]
+
+            laptop = self.runtime(8830, "laptop", state_dir)
+            accepted = laptop.collaboration.accept_pairing_token(token)
+
+            self.assertEqual(accepted.status, "error")
+            self.assertNotIn(
+                "relay_paired_client_id",
+                laptop.session.component_metadata("relay"),
+            )
+
     def test_the_paired_client_id_survives_a_restart(self):
         # Caught by running it: the id was set in memory only, so the second
         # client came back as a *peer* of its siblings - publishing into a

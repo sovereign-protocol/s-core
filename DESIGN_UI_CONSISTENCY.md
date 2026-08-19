@@ -456,6 +456,30 @@ in it, a Seat is that office filled (`team_role_holding`), and Members are
 people irrespective of office. If those three read as one thing, the set has
 failed.
 
+### An object is drawn from its kind
+
+**The caller names the object; Core draws it.** `ENTITY_GLYPHS` maps an
+entity kind to its paths, and `SovereignUI.entityBadge({kind})` reads the
+drawing from there. `entityGlyph(kind)` exposes the same table for a surface
+that draws its own row rather than a badge, and `SovereignUI.disclosure`
+takes a `glyph` kind so a section carries the mark of what it holds.
+
+`entityBadge` used to take an `icon` argument. S-Team passed a key emoji for
+a trusteeship, an open diamond for a role and a filled one for a membership —
+three drawings chosen at three call sites, for objects Core already had names
+for, and all three under `kind: "role"`. The argument is gone. One object has
+one glyph because there is nowhere for a second one to come from, which is
+U1 applied to pictures.
+
+The kinds are `team`, `role`, `seat`, `trustee`, `membership`, and `person` —
+which takes an avatar rather than a glyph, because a person is not a kind of
+thing but somebody in particular.
+
+A row that has room for a mark shares its label's cell rather than taking a
+grid column of its own. S-Team's `elementRow` is a three-column grid, and a
+fourth child would have put every other row's actions in a different column —
+the same reason its disclosure caret already shared that cell.
+
 **Trustee is a key** because a trustee holds the team's identity on behalf of
 the members — `agreement_identity` is a trustee role, per
 `DESIGN_NODE_CLASSES.md`. Not a gavel, which reads legal and is illegible
@@ -497,15 +521,23 @@ has no third-party section. Either it gains an MIT attribution block or every
 path is redrawn originally — the repositories are public, so this is decided
 before release, not after.
 
-### Not yet assigned
+### Wired, and not
 
-`NODE_LABELS` also carries Section, Clause, Accountability, Domain, Role
-answer, Membership application, Membership invitation, Membership type,
-Trustee election and Trusteeship state. Most need no mark of their own:
-Section and Clause are document structure and inherit the Agreement family,
-and the membership variants are states of one object — one glyph with a
-state, not four glyphs. **Trustee election is the one real gap**: it has to
-read as contested, and a key does not.
+**Wired** (S-Team): Role on a role card, Trustee on the Identity and Trust
+cards, Seat on a role somebody holds, Members on a membership badge and on
+the Members section. Roles and Members carry their mark on the section
+heading as well as on the badges inside it, from the one table.
+
+**Drawn but unwired**: Agreement and Purpose. No surface asks for them yet;
+the paths above are the specification for when one does.
+
+**Not drawn.** `NODE_LABELS` also carries Section, Clause, Accountability,
+Domain, Role answer, Membership application, Membership invitation,
+Membership type, Trustee election and Trusteeship state. Most need no mark
+of their own: Section and Clause are document structure and inherit the
+Agreement family, and the membership variants are states of one object — one
+glyph with a state, not four glyphs. **Trustee election is the one real
+gap**: it has to read as contested, and a key does not.
 
 ## Current palettes
 

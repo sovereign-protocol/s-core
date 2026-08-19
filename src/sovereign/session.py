@@ -3155,7 +3155,8 @@ class Session:
 
     # An agenda is what a topic's participants want to talk about, merged
     # across everyone discussing it. That is a collaboration primitive, not a
-    # property of boards, and every application's topic is a root. Only the
+    # property of any one application, and every application's topic is a
+    # root. Only the
     # originator may edit or remove their own item; everyone sees the merged
     # list.
     AGENDA_PRIORITIES = ("high", "medium", "low")

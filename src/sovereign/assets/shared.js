@@ -80,6 +80,61 @@ const ICON_CHANGES =
 const ICON_REMOVE =
   '<circle cx="12" cy="12" r="8.5"></circle><path d="M8.5 12h7"></path>';
 
+/*
+  Object glyphs (U8). One idea, four strokes, drawn beside a name.
+
+  A Role is an office with nobody in it; a Seat is that office filled; Members
+  are people irrespective of office. Those three are the distinction S-Team's
+  domain actually turns on, so they are three drawings and not one - a shield,
+  a shield with somebody in it, and two people.
+
+  A Trustee is a key: a trustee holds the team's identity on behalf of its
+  members, which is what a key means. Not a gavel, which reads legal and is
+  illegible small, and not a crown, which reads status rather than
+  stewardship.
+*/
+const ICON_ROLE = '<path d="M12 3l7 3v5c0 4-3 7-7 8-4-1-7-4-7-8V6z"></path>';
+const ICON_SEAT =
+  '<path d="M12 4l6 2.5v4c0 3.2-2.4 5.6-6 6.5-3.6-.9-6-3.3-6-6.5v-4z"></path>' +
+  '<circle cx="12" cy="9.5" r="1.8"></circle>' +
+  '<path d="M9 14.4c.5-1.4 1.6-2.2 3-2.2s2.5.8 3 2.2"></path>';
+const ICON_MEMBERS =
+  '<circle cx="9" cy="7" r="4"></circle>' +
+  '<path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"></path>' +
+  '<path d="M16 3.13a4 4 0 0 1 0 7.75"></path>' +
+  '<path d="M21 21v-2a4 4 0 0 0-3-3.85"></path>';
+const ICON_TRUSTEE =
+  '<circle cx="8" cy="15" r="3.6"></circle>' +
+  '<path d="M10.6 12.4L20 3"></path><path d="M15.6 7.4l2.6 2.6"></path>';
+const ICON_ORGANIZATION =
+  '<rect x="9" y="3" width="6" height="5" rx="1"></rect>' +
+  '<rect x="3" y="16" width="6" height="5" rx="1"></rect>' +
+  '<rect x="15" y="16" width="6" height="5" rx="1"></rect>' +
+  '<path d="M12 8v4"></path><path d="M6 16v-4h12v4"></path>';
+
+// What each kind of thing is drawn as. An application names the object; Core
+// draws it, so the same object cannot be a shield in one place and a diamond
+// in another - which is what a per-call `icon` argument produced, and what
+// U1 predicts about anything an application is left to choose for itself.
+const ENTITY_GLYPHS = {
+  team: ICON_ORGANIZATION,
+  role: ICON_ROLE,
+  seat: ICON_SEAT,
+  trustee: ICON_TRUSTEE,
+  membership: ICON_MEMBERS,
+};
+
+function entityGlyph(kind) {
+  const paths = ENTITY_GLYPHS[kind];
+  if (!paths) return null;
+  const svg = document.createElement("span");
+  svg.className = "ui-entity-icon";
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML =
+    `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${paths}</svg>`;
+  return svg;
+}
+
 function iconButton(svgInner, label, action) {
   const button = document.createElement("button");
   button.type = "button";
@@ -118,6 +173,13 @@ const SovereignUI = Object.freeze({
     return avatar;
   },
 
+  // The mark for a kind of thing, on its own. An application that draws its
+  // own row rather than a badge still gets the drawing from here, so one
+  // object has one glyph wherever it appears (U8).
+  entityGlyph(kind) {
+    return entityGlyph(kind);
+  },
+
   entityBadge(options = {}) {
     const interactive = Boolean(options.interactive);
     const badge = document.createElement(interactive ? "button" : "span");
@@ -141,11 +203,12 @@ const SovereignUI = Object.freeze({
         }),
       );
     } else {
-      const icon = document.createElement("span");
-      icon.className = "ui-entity-icon";
-      icon.setAttribute("aria-hidden", "true");
-      icon.textContent = options.icon || (kind === "team" ? "▤" : "◇");
-      badge.append(icon);
+      // Drawn from the kind and from nothing else. There is deliberately no
+      // per-call override: a role that is a shield here and a diamond there
+      // is the divergence U8 exists to prevent, and the caller naming the
+      // object is all the information the drawing needs.
+      const icon = entityGlyph(kind);
+      if (icon) badge.append(icon);
     }
     if (!options.compact && options.label) {
       const label = document.createElement("span");
@@ -170,6 +233,11 @@ const SovereignUI = Object.freeze({
     chevron.className = "ui-disclosure-chevron";
     chevron.textContent = ">";
     chevron.setAttribute("aria-hidden", "true");
+    // A section names a kind of thing, so it may carry that kind's mark -
+    // from the same table the badges inside it use, which is what stops a
+    // heading and its contents drawing the same object two ways.
+    const glyph = options.glyph ? entityGlyph(options.glyph) : null;
+    if (glyph) toggle.append(glyph);
     const content = document.createElement("div");
     content.className = "ui-disclosure-content";
     const contentId = `ui-disclosure-${++uiDisclosureSequence}`;
@@ -1920,7 +1988,7 @@ Object.assign(SovereignShell, {
 
   // A decision about the topic itself belongs beside the topic's name, not
   // in the far corner with the application-level actions. Adopting a
-  // renamed board is about the thing the title shows, and a control that
+  // renamed topic is about the thing the title shows, and a control that
   // far from it reads as belonging to something else entirely.
   setTopicActions(node) {
     this._topicActions = node || null;
@@ -1946,7 +2014,7 @@ Object.assign(SovereignShell, {
   // is Core's functionality, so its appearance and its rules are Core's.
   //
   // What each entry means stays the application's. Core knows a template is
-  // a value with a label; whether that value is a board to copy, a team to
+  // a value with a label; whether that value is an initiative to copy, a team to
   // clone or a workflow definition is not its business, and neither is what
   // creating actually calls.
 
@@ -2360,7 +2428,7 @@ Object.assign(SovereignShell, {
       // walked top to bottom without opening anything.
       //
       // canReact is for an application that shows several topics: the Cockpit
-      // can settle a board node and only link to a team's, and offering a
+      // can settle an initiative node and only link to a team's, and offering a
       // button it cannot honour would be worse than offering none.
       const reactable = this._options.canReact ? this._options.canReact(item.node_uuid) : true;
       if (this._options.reactNode && reactable) {
@@ -2510,7 +2578,7 @@ Object.assign(SovereignShell, {
                 },
               ];
             }
-            const topics = change.applicationId === "team" ? draft.teams || [] : draft.boards || [];
+            const topics = change.applicationId === "team" ? draft.teams || [] : draft.initiatives || [];
             const tile = topics.find((entry) => entry.uuid === change.topic);
             if (tile) tile.agenda_count = Number(tile.agenda_count || 0) + 1;
             return draft;
@@ -2856,7 +2924,7 @@ Object.assign(SovereignShell, {
       "</fieldset>",
       // Pairing lives here, beside the channel list, because that is what it
       // is about: a pairing token carries this client's channels, not the
-      // board that happens to be open. It is deliberately not a channel row
+      // topic that happens to be open. It is deliberately not a channel row
       // action - an invite token connects you to another person, a pairing
       // token makes a second machine into *you*, and side by side as row
       // actions those read as variations of one thing.

@@ -1020,7 +1020,7 @@ class SessionTests(unittest.TestCase):
 
     def test_apply_peer_subtree_ignores_non_identity_roots(self):
         session = Session("si-a")
-        board = ProtocolNode({"type": "kanban_board", "name": "Board"})
+        board = ProtocolNode({"type": "initiative", "name": "Initiative"})
         board.refresh_hashes()
 
         session.apply_peer_subtree("http://addr-b", board, None)
@@ -1101,9 +1101,9 @@ class SessionTests(unittest.TestCase):
 
     # reconcile_peer_changes / accept_peer_node / peer_discusses_node -
     # generic peer-content reconciliation, generalized out of
-    # kanban_logic.py's adopt_incoming_changes. Deliberately exercised here
-    # with non-kanban node types ("note"/"note_item"/"leaf") to prove the
-    # mechanism carries no kanban-specific assumptions.
+    # S-Initiative's adopt_incoming_changes. Deliberately exercised here
+    # with node types no application owns ("note"/"note_item"/"leaf") to
+    # prove the mechanism carries no application-specific assumptions.
 
     def test_peer_discusses_node(self):
         session = Session("si-a")
@@ -1449,7 +1449,7 @@ class SessionTests(unittest.TestCase):
         # its whole subtree) - now the default in accept_peer_node, so no
         # adopt-mode hint is passed. The deeper "doesn't smuggle a
         # simultaneously-added child" property is covered end-to-end by the
-        # kanban auto-adopt tests in test_kanban_new_logic.py.
+        # initiative auto-adopt tests in test_initiative_new_logic.py.
         peer = Session("si-b")
         topic = peer.create_child(
             peer.protocol.root.uuid, {"type": "note", "name": "t"}, {},
