@@ -552,6 +552,14 @@ S-Team was `#111827` until U2, almost exactly the Cockpit's `#0d1117`, so
 two of the three applications looked alike. The warm neutral separates it and
 avoids every reserved colour.
 
+## Local controls awaiting a second caller
+
+S-Initiative currently owns the date input used for planned initiative and
+milestone dates. Core has no `SovereignUI` date primitive yet. It stays local
+until a second application needs one; that caller supplies the evidence for a
+shared value/clear/validation contract instead of Core guessing it from one
+surface.
+
 ## Modal Conventions
 
 - X top-right, click-outside-to-close
