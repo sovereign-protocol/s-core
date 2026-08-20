@@ -677,14 +677,21 @@ class LocalWorkLeavesWithoutPayingForInboundSyncTests(RelayEfficiencyCase):
         self.assertEqual(relay_a.storage.calls["read_head_with_mtime"], 0)
         self.assertEqual(relay_a.storage.calls["read_snapshot"], 0)
 
-    def test_an_unchanged_topic_publishes_nothing(self):
+    def test_a_consumed_wakeup_does_not_visit_the_relay(self):
         session, relay_a, made = self.publisher(2)
         _, relay_b = self.subscriber({node.uuid for node in made})
         self.settle(relay_a, relay_b)
 
+        # A regular cycle can consume the work before the event loop serves
+        # the edit's queued publish-only wakeup. That stale wakeup is idle: it
+        # must not recheck every topic's slot on the relay.
+        session.modify(made[0].uuid, {"type": "notes", "name": "renamed"}, {})
+        relay_a.poll_once()
+        relay_a.storage.reset()
+
         relay_a.publish_once()
 
-        self.assertEqual(relay_a.storage.calls["write_snapshot"], 0)
+        self.assertEqual(dict(relay_a.storage.calls), {})
 
 
 if __name__ == "__main__":

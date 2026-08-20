@@ -1147,9 +1147,11 @@ class RelayLogic:
             # every topic cost one head read each before a single byte went
             # out - measured at 2.5-3.4s of reads in front of a 0.9s publish,
             # which is worse than the ordering this exists to avoid.
-            for topic_uuid in self._topics_with_unpublished_work():
-                self._reconcile_sibling_publication(topic_uuid)
-            published = self.publish_due_topics()
+            due_topics = self._topics_with_unpublished_work()
+            if due_topics:
+                for topic_uuid in due_topics:
+                    self._reconcile_sibling_publication(topic_uuid)
+                published = self.publish_due_topics()
         except Exception as exc:
             duration = time.monotonic() - started
             self.session.trace_event(
