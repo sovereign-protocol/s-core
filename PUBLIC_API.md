@@ -164,6 +164,9 @@ them. The shared browser shell exposes the same operations at
 **Connected work** (`sovereign_relationship`, `RelationshipService` in
 `relationships.py`) is the opposite on every count: a real protocol node,
 per-actor authored, and shared wherever the source topic already publishes.
+An application that must recognize this type in its own tree - to authorize
+an incoming peer's connection, say - matches the literal type name, the same
+way it already matches every other node type it does not own.
 
 - `create_relationship(parent_uuid, topic_uuid)` connects an already-held
   topic, running any registered `validate_relationship` hook first.
