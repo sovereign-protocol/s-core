@@ -106,6 +106,7 @@ button.danger {
   font: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
+  pointer-events: none;
 }
 .ui-select-toggle {
   display: inline-grid;
@@ -116,6 +117,7 @@ button.danger {
   border: 0;
   color: var(--text-muted, var(--shell-muted, currentColor));
   background: transparent;
+  pointer-events: none;
 }
 .ui-select-toggle .icon-svg {
   width: 13px;
@@ -160,6 +162,7 @@ button.danger {
   inset: 0;
   box-sizing: border-box;
   width: 100% !important;
+  max-width: none !important;
   height: 100%;
   min-width: 0;
   min-height: 0;
@@ -499,7 +502,11 @@ button.ui-entity-badge:not(:disabled):focus-visible {
    divergence itself is already marked wherever it sits, and this is only the
    way out of it. Applications add their own class for placement; the shared
    rules keep the wording, the menu and the focus behaviour identical. */
-.ui-react-button {
+button.ui-react-button.ui-react-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   min-height: 24px;
   padding: 2px 8px;
   border: 1px solid var(--line, var(--shell-border, rgba(127, 127, 127, 0.35)));
@@ -510,12 +517,27 @@ button.ui-entity-badge:not(:disabled):focus-visible {
   line-height: 1.4;
   white-space: nowrap;
 }
-.ui-react-button:hover,
-.ui-react-button:focus-visible {
+button.ui-action-button.ui-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+button.ui-react-button.ui-react-button:hover,
+button.ui-react-button.ui-react-button:focus-visible {
   border-color: var(--teal);
   background: var(--teal-soft);
 }
-.ui-react-button:disabled { cursor: default; opacity: 0.55; }
+button.ui-react-button.ui-react-button:disabled { cursor: default; opacity: 0.55; }
+.ui-action-icon,
+.ui-action-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.ui-action-icon .icon-svg { width: 14px; height: 14px; }
+.ui-action-chevron .icon-svg { width: 12px; height: 12px; }
 
 .ui-action-menu {
   position: fixed;
@@ -531,7 +553,10 @@ button.ui-entity-badge:not(:disabled):focus-visible {
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
 }
 .ui-action-menu[hidden] { display: none; }
-.ui-action-menu-option {
+button.ui-action-menu-option.ui-action-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   padding: 6px 10px;
   border: 0;
   border-radius: 6px;
@@ -540,12 +565,12 @@ button.ui-entity-badge:not(:disabled):focus-visible {
   font-size: 13px;
   text-align: left;
 }
-.ui-action-menu-option:hover,
-.ui-action-menu-option:focus-visible {
+button.ui-action-menu-option.ui-action-menu-option:hover,
+button.ui-action-menu-option.ui-action-menu-option:focus-visible {
   background: var(--teal-soft);
 }
-.ui-action-menu-option:disabled { cursor: default; opacity: 0.6; }
-.ui-action-menu-option.is-danger { color: var(--danger); }
+button.ui-action-menu-option.ui-action-menu-option:disabled { cursor: default; opacity: 0.6; }
+button.ui-action-menu-option.ui-action-menu-option.is-danger { color: var(--danger); }
 .ui-action-menu-separator {
   height: 1px;
   margin: 4px 6px;
@@ -1080,6 +1105,9 @@ dialog menu .danger:not(:last-child) {
   --stage-review-text: #f59e0b;
   --stage-transit-fill: #8c9bab;
   --stage-transit-text: #8c9bab;
+  --stage-conflict-wash: rgba(220, 38, 38, 0.10);
+  --stage-review-wash: rgba(245, 158, 11, 0.10);
+  --stage-transit-wash: rgba(140, 155, 171, 0.09);
 }
 
 /* In flight and awaiting a peer share the grey, because neither is anybody's
@@ -1090,6 +1118,158 @@ dialog menu .danger:not(:last-child) {
 @keyframes stage-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+/* Projection semantics independent of any shell or application layout. The
+   temporary marker means "still travelling"; colour says who can act. A
+   bounded surface carries the steady state as a quiet wash and leading edge. */
+.ui-transition-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--stage-transit-fill);
+  vertical-align: middle;
+}
+.ui-transition-marker::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ui-transition-marker[data-transition-stage="awaiting_me"] {
+  color: var(--stage-review-fill);
+}
+.ui-transition-marker[data-transition-stage="conflict"] {
+  color: var(--stage-conflict-fill);
+}
+.ui-transition-marker[data-transition-stage="in_flight"]::before {
+  animation: stage-pulse 1.8s ease-in-out infinite;
+}
+.ui-transition-marker:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.ui-transition-surface.ui-transition-surface {
+  position: relative;
+  --ui-transition-edge: var(--stage-transit-fill);
+  --ui-transition-wash: var(--stage-transit-wash);
+  /* Two classes deliberately outrank application card rules such as
+     `box-shadow: none`; transition state is shared semantic decoration. */
+  box-shadow: inset 4px 0 0 var(--ui-transition-edge);
+  background-image: linear-gradient(
+    var(--ui-transition-wash), var(--ui-transition-wash)
+  );
+}
+.ui-transition-surface[data-transition-stage="in_flight"],
+.ui-transition-surface[data-transition-stage="awaiting_peer"] {
+  --ui-transition-edge: var(--stage-transit-fill);
+  --ui-transition-wash: var(--stage-transit-wash);
+}
+.ui-transition-surface > .ui-transition-surface-marker {
+  position: absolute;
+  z-index: 1;
+  top: 1px;
+  right: 1px;
+}
+.ui-transition-surface > .ui-transition-surface-marker[role="img"] {
+  pointer-events: none;
+}
+.ui-transition-surface[data-transition-stage="awaiting_me"] {
+  --ui-transition-edge: var(--stage-review-fill);
+  --ui-transition-wash: var(--stage-review-wash);
+}
+.ui-transition-surface[data-transition-stage="conflict"] {
+  --ui-transition-edge: var(--stage-conflict-fill);
+  --ui-transition-wash: var(--stage-conflict-wash);
+}
+
+/* A future-change policy, not a current transition. The 22px target is
+   focusable for its explanation; only the quiet 13px outline is visible. */
+.ui-bound-field {
+  position: relative;
+}
+.ui-adoption-policy-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--shell-muted, currentColor);
+  opacity: 0.55;
+}
+.ui-adoption-policy-marker .icon-svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke-width: 1.25;
+}
+.ui-adoption-policy-marker:hover,
+.ui-adoption-policy-marker:focus-visible {
+  opacity: 0.9;
+}
+.ui-adoption-policy-marker:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: -3px;
+}
+.ui-bound-field > .ui-adoption-policy-surface-marker {
+  position: absolute;
+  z-index: 1;
+  top: 1px;
+  right: 1px;
+}
+.ui-transition-surface.ui-transition-surface[data-transition-perspective],
+.ui-transition-surface.ui-transition-surface.ui-perspective-ghost,
+.ui-transition-surface.ui-transition-surface.ui-perspective-alternative {
+  /* Four one-pixel gradients give a longer, quieter dash than CSS `dashed`.
+     Every side has identical weight; there is deliberately no leading bar. */
+  box-shadow: none;
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px,
+      transparent 8px 13px
+    ),
+    repeating-linear-gradient(
+      to right,
+      var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px,
+      transparent 8px 13px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px,
+      transparent 8px 13px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px,
+      transparent 8px 13px
+    ),
+    linear-gradient(
+      var(--ui-transition-wash, var(--stage-transit-wash)),
+      var(--ui-transition-wash, var(--stage-transit-wash))
+    );
+  background-position: left top, left bottom, left top, right top, left top;
+  background-repeat: no-repeat;
+  background-size: 100% 1px, 100% 1px, 1px 100%, 1px 100%, 100% 100%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-transition-marker[data-transition-stage="in_flight"]::before,
+  .ui-transition-surface > .ui-transition-surface-marker::before {
+    animation: none;
+  }
 }
 
 /* Which application this is, beside the name it belongs to. */
@@ -1132,11 +1312,6 @@ dialog menu .danger:not(:last-child) {
   background: var(--shell-field);
   font-size: 13px;
 }
-/* A reference to something you do not hold is an invitation, not an error. */
-.shell-link-row.unheld {
-  border-style: dashed;
-  opacity: 0.72;
-}
 .shell-link-label {
   flex: none;
   color: var(--shell-muted);
@@ -1174,19 +1349,15 @@ dialog menu .danger:not(:last-child) {
   align-items: baseline;
   padding: 8px 10px;
   border-radius: 6px;
-  border-left: 3px solid transparent;
   background: rgba(127, 127, 127, 0.1);
 }
-.shell-disagreement-row[data-status="conflict"] {
-  border-left-color: var(--stage-conflict-fill);
+.shell-disagreement-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
 }
-.shell-disagreement-row[data-status="awaiting_me"] {
-  border-left-color: var(--stage-review-fill);
-}
-.shell-disagreement-row[data-status="awaiting_peer"],
-.shell-disagreement-row[data-status="in_flight"] {
-  border-left-color: var(--stage-transit-fill);
-}
+.shell-disagreement-summary .ui-transition-marker { margin: -3px 0 -3px -6px; }
 .shell-disagreement-label {
   white-space: pre-line;
   font-size: 13px;

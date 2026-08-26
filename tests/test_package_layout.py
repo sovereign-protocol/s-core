@@ -47,6 +47,24 @@ class PackageLayoutTests(unittest.TestCase):
             files("sovereign.assets").joinpath("shared-session.js").is_file(),
         )
         self.assertTrue(files("sovereign.assets").joinpath("manual.html").is_file())
+        self.assertTrue(
+            files("sovereign.assets").joinpath("sovereign-client.js").is_file(),
+        )
+        self.assertTrue(
+            files("sovereign.assets").joinpath("binding-example.html").is_file(),
+        )
+
+    def test_headless_binding_client_does_not_construct_the_shell(self):
+        client = files("sovereign.assets").joinpath(
+            "sovereign-client.js",
+        ).read_text(encoding="utf-8")
+        self.assertIn("SovereignClient", client)
+        self.assertIn("bindField", client)
+        self.assertIn("confirmedValue", client)
+        self.assertIn("pendingValue", client)
+        self.assertIn("SovereignUI.decorateTransition", client)
+        self.assertIn("SovereignUI.reactionControl", client)
+        self.assertNotIn("SovereignShell", client)
 
     def test_package_sources_live_under_the_declared_src_root(self):
         # Asserting where the imported module loaded from only holds for an
@@ -78,9 +96,32 @@ class PackageLayoutTests(unittest.TestCase):
             "reorderHandle", "reorderableList", "addComposer",
             "selectControl", "refreshSelect", "selectOptions",
             "selectionControl", "selectionField",
-            "actionMenu", "reactionControl",
+            "actionMenu", "actionButton", "reactionControl", "reactionPresentation",
+            "transitionMarker", "decorateTransition", "adoptionPolicyMarker",
+            "decorateAdoptionPolicy",
         ):
             self.assertIn(f"  {primitive}(", SHARED_JS)
+
+    def test_transition_projection_has_one_shared_visual_vocabulary(self):
+        shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
+            encoding="utf-8",
+        )
+        for marker in (
+            "ICON_ADOPT", "ICON_TAKE_BACK", "reactionPresentation",
+            "data-transition-stage", "data-transition-perspective",
+        ):
+            self.assertIn(marker, SHARED_JS + shared_css)
+        self.assertIn('options.density || "inline"', SHARED_JS)
+        self.assertIn('density: "review"', SHARED_JS)
+        self.assertIn(".ui-transition-marker", shared_css)
+        self.assertIn(".ui-transition-surface", shared_css)
+        self.assertIn('options.stages || ["in_flight"]', SHARED_JS)
+        self.assertIn("inset 4px 0 0", shared_css)
+        self.assertIn(
+            "var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px",
+            shared_css,
+        )
+        self.assertIn("box-shadow: none", shared_css)
 
     def test_selection_fields_and_action_menus_have_distinct_shared_contracts(self):
         shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
@@ -107,6 +148,10 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("select.ui-select-native", shared_css)
         self.assertIn("border: 1px solid var(--line", shared_css)
         self.assertIn("color-scheme: inherit", shared_css)
+        native = shared_css.split(
+            ".ui-select-control > select.ui-select-native {", 1,
+        )[1].split("}", 1)[0]
+        self.assertIn("max-width: none !important", native)
         self.assertIn("select.ui-select-native option", shared_css)
         self.assertIn("var(--surface, var(--panel, var(--shell-surface, Canvas)))", shared_css)
         self.assertIn(".ui-action-menu", shared_css)
@@ -237,6 +282,7 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn('document.addEventListener("mousemove", move)', reorder)
         self.assertIn('document.addEventListener("mouseup", up)', reorder)
         self.assertIn('event.key !== previous && event.key !== next', reorder)
+        self.assertIn("item.dataset.reorderId = id", reorder)
         self.assertNotIn("row.draggable = true", agenda_row)
 
     def test_collaboration_selects_use_the_shared_option_population(self):
@@ -442,26 +488,16 @@ class ShellLayoutTests(unittest.TestCase):
         self.assertIn("min-height: 0", title)
         self.assertIn("line-height:", title)
 
-    def test_a_reference_you_do_not_hold_reads_as_an_offer(self):
-        # Dashed and dimmed, not red and not hidden: following it reaches
-        # whatever a peer is already publishing, so it is an invitation.
-        # U7 moved it out of the bar and into the dialog that manages what
-        # this topic is attached to - taking one up is an act, not a
-        # destination, and it belongs where the acts are.
-        unheld = self.SHARED_CSS.split(".shell-link-row.unheld {", 1)[1].split(
-            "}", 1,
-        )[0]
-        self.assertIn("border-style: dashed", unheld)
-        self.assertIn("opacity", unheld)
-        self.assertIn("Add to Cockpit", SHARED_JS)
-        # The navigation row and its menu list only what you hold: both are
-        # places to go, and taking a reference up is an act, not a
-        # destination.
+    def test_title_links_are_local_navigation_only(self):
+        self.assertIn("/api/core/navigation/", SHARED_JS)
+        self.assertIn("No local navigation links yet.", SHARED_JS)
+        self.assertNotIn("Add to Cockpit", SHARED_JS)
+        self.assertNotIn("onFollow", SHARED_JS)
         related = SHARED_JS.split("_buildRelatedMenu(button) {", 1)[1].split(
             "\n  },", 1,
         )[0]
-        self.assertIn("filter((link) => link.held)", related)
-        self.assertIn("Link related…", related)
+        self.assertIn("this._navigation.links", related)
+        self.assertIn("Manage links", related)
 
     def test_the_navigation_row_orders_destinations_by_range(self):
         """Nearest first, widest last, with a rule where the range changes.

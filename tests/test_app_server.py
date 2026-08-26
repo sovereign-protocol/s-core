@@ -651,6 +651,31 @@ class AppServerTests(unittest.TestCase):
 
         self.assertEqual(calls["count"], 1)
 
+    def test_drain_peer_update_hook_reconciles_core_bindings(self):
+        calls = {"count": 0}
+        persisted = []
+        session = Session("local")
+
+        class Bindings:
+            def reconcile_adoption(self):
+                calls["count"] += 1
+                return calls["count"] == 1
+
+        runtime = types.SimpleNamespace(
+            host=types.SimpleNamespace(
+                notify_peer_update=lambda: PeerUpdateOutcome(changed=False),
+            ),
+            binding_service=Bindings(),
+            session=session,
+            persist_confirmed_change=lambda kind: persisted.append(kind),
+        )
+
+        asyncio.run(app_server.drain_peer_update_hook(runtime, passes=4))
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(persisted, ["peer-reconciliation"])
+        self.assertEqual(session.current_view_revision(), 1)
+
     def test_channel_poll_tick_drains_adoption_hook_after_apply(self):
         # Regression (review A-4): relay-applied peer content only reached
         # the cache; adoption ran solely from UI polls and http p2p

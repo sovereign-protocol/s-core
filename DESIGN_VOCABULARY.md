@@ -70,7 +70,7 @@ cannot act on inflates the one you can.
 | Agenda entry | `agenda_item` | **agenda item** | "discussion topic", "point" |
 | You hold it | `held` | **in my Cockpit** | "held" |
 | You do not hold it | `unheld` | **available to add** | "not held", "unheld" |
-| Stop holding it | `remove_topic_link`, drop | **remove from Cockpit** | "stop holding", "drop" |
+| Stop holding it | drop | **remove from Cockpit** | "stop holding" |
 | The right-hand pane | — | **People and channels** | "Sharing & Sync" |
 
 ### There is no collective noun
@@ -79,10 +79,8 @@ Where the shell must name an Initiative, an Organization and a Flow at once,
 it **composes from `topic_noun` or avoids the noun**. It does not introduce a
 generic word — not "topic", not "work", not "space".
 
-- A menu entry that applies to any kind reads `Link related…`, not `Link
-  related topic…`.
-- The dialog it opens titles itself from the kind in hand: "Link this
-  initiative to…".
+- A menu entry that applies to any kind reads `Manage links…`; these are
+  local navigation shortcuts and not domain relationships.
 - Prose names the kind: "This flow is held by two people", never "this topic
   is held by two people".
 
@@ -107,7 +105,7 @@ Changing either means overturning a recorded decision, not picking a synonym.
 The standing rule and the individual act use the same verb. The per-change
 buttons already read "Adopt card move from B" and "Take back my card move",
 and adoption is the protocol's own concept — see `DESIGN_ADOPTION_METADATA.md`
-and U6's "a link is adopted same-origin". A setting that says "apply" above
+and `DESIGN_ADOPTION_METADATA.md`. A setting that says "apply" above
 buttons that say "adopt" is the split this document exists to close.
 
 "Adopt" also carries what "apply" does not: a change from someone else becomes
@@ -134,12 +132,11 @@ still visible: the control pulses while anything is in flight.
 
 | Where | Says |
 | --- | --- |
-| The navigation row | the related topics' own names, and nothing else |
-| Related menu, heading | Related |
-| Related menu, below the divider | Link related… |
+| The navigation row | local destinations' own names, and nothing else |
+| Navigation menu, heading | Navigation |
+| Navigation menu, below the divider | Manage links… |
 | The Cockpit, on the row | no words — its mark, labelled "Open S-Cockpit" |
-| Link dialog, an item you do not hold | Add to Cockpit |
-| Anywhere a held item is dropped | Remove from Cockpit |
+| Link dialog | Navigation links |
 
 **The row carries no kind labels.** A related topic is named and nothing
 more. The kind was a chip's small-capitals prefix and it bought nothing — the
@@ -200,3 +197,15 @@ wording of the two it does.
 `has-divergence` and `shellNotAlignedTitle` keep their names. They are read by
 tests and by application stylesheets, and renaming them buys nothing a person
 can see. Where a heading's text changes, the id above it does not.
+
+## Reaction controls
+
+The inline vocabulary is deliberately shorter than the explanatory sentence:
+**Adopt**, **Take back**, and **React**. The icon supports the word but never
+replaces it. `React` is used only when a menu mixes adoption and taking back;
+a menu containing one kind names that kind. Review surfaces retain the full
+sentence in the tooltip and accessible name, such as “Adopt card move from
+Ana”, while keeping the visible button short.
+
+**Proposal** remains domain language. It may name a proposal in a decision
+process, but it must not label an arbitrary incoming revision.

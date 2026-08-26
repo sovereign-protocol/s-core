@@ -2,6 +2,30 @@
 
 ## 0.1.9
 
+- **Reaction buttons stay short while their explanations stay precise.**
+  Every direct control reads `Adopt` or `Take back`; its tooltip and accessible
+  name identify the actor, object, and fields involved. Menus retain the full
+  action sentence on each choice.
+
+- **Shared selects and reorder handles now work across their whole face.** A
+  page-level `max-width` could cap the transparent native select before the
+  drawn chevron, and reorder items supplied through `getId` were not given the
+  identity the nested-list guard requires. The chevron now opens the select,
+  and both pointer and keyboard reordering reach application-owned lists.
+
+- **A reaction to several field edits names the fields.** The explicit tooltip
+  can now say `Take back my initiative name and intention changes` instead of
+  the ambiguous `Take back my initiative modification`.
+
+- **Held generic fields explain their policy with a quiet outline hand.** The
+  effective inherited adoption policy now travels with binding views, and the
+  shared decoration hides the hand whenever an actual transition is present.
+
+- **Links below a topic title are local navigation metadata.** They are no
+  longer protocol nodes, never publish or adopt, require both topics to be
+  held, grant no access, and do not prevent a topic being dropped. Core owns
+  their store, API, menu, and live route/title resolution.
+
 - **The shell's agenda count follows the Cockpit's renamed tile family.** The
   optimistic update read `draft.boards`; that key is `draft.initiatives` now.
   Nothing else in Core named it, and the comments that described a topic as "a

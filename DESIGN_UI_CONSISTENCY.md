@@ -198,50 +198,17 @@ applications had each grown that table; one of them could start a team from a
 snapshot file and another could not, which is the same drift U1 predicts about
 appearance, arriving in behaviour. See `PUBLIC_API.md`, "Making a topic".
 
-## U6 — what a topic is attached to is shown by Core, beside its name
+## U6 — title links are local navigation
 
-**ACCEPTED.** `SovereignShell.setTopicLinks` draws every reference a topic
-makes, as chips after `[+ Link]` in the Middle region. S-Initiative's chips
-and S-Team's rows-and-pulldowns were two renderings of one thing; both are
-gone.
+**ACCEPTED, revised 2026-08-20.** The links below a topic title are shortcuts
+among topics this client already holds. Core stores and renders them because
+navigation and application routes are Core concerns. They are local metadata:
+not published, adopted, change-counted, or capable of granting access.
 
-Where the line falls:
-
-- **Core** draws the chips, opens the link menu, and performs the two acts
-  that are its own: taking up a reference you do not hold, and removing one.
-  It composes every destination from `application_summaries()`, so no
-  application knows another's route — the query parameter is `?topic=` in all
-  of them, which is what made that possible.
-- **The application** says which links exist, what there is to link, and what
-  making one calls.
-
-Three consequences worth stating.
-
-**Nobody sets who may remove.** A link is adopted same-origin, so the only
-reference you can take off is the one you put up — Core refuses the rest in
-`remove_topic_link` rather than deleting locally and diverging. The `×` acts
-at once, everywhere, with no confirmation: what it removes is one reference,
-and the topic and everybody else's reference to it are untouched.
-
-**An offer is a link, drawn dimmed.** S-Team kept unheld items out of the
-list and in a "Connect to…" pulldown, reasoning that a row is something you
-can open and an offer is not. True of a row; not true of a chip that says so
-itself. Clicking a dashed chip takes it up.
-
-**A link on the topic belongs in the bar; a link on a node does not.** A card
-naming the process it waits on renders beside the card — in the bar it would
-be a fact about something you cannot see. This settles the open question in
-`DESIGN_TOPIC_LINKS.md` about a reference to an unreachable topic: beside the
-node it is information, in the topbar it would be noise.
-
-The bar shows four chips and turns the rest into a count that opens the full
-list. A team can run a dozen things; a bar that holds all of them stops being
-a bar.
-
-**Superseded in part by U7, 2026-08-18.** What a topic is attached to is still
-Core's to draw and still lives beside the name — but as one menu, not as
-chips. The last sentence above is the reason: the bar lost the argument at
-four chips, not at twelve.
+A team running an initiative or an initiative belonging to a team is not
+navigation; it is an application-domain relationship. S-Team renders those in
+Work and S-Initiative renders them in the Mandate. Each application owns its
+relationship node type and rules. See `DESIGN_NAVIGATION_LINKS.md`.
 
 ## U7 — one bar, five objects
 
@@ -491,15 +458,13 @@ collaboration button that owned `ICON_COLLABORATION`.
 
 ### Acts, and the three destructions
 
-`DESIGN_TOPIC_LINKS.md` keeps **remove**, **drop** and **delete** strictly
-apart, and records what conflating them cost: a list removal that called
-`delete_process` destroyed the thing everywhere. At the surface those three
-become two promises, and each promise gets one glyph that is never used for
-the other.
+`DESIGN_NAVIGATION_LINKS.md` keeps a local shortcut outside the protocol.
+Removing one therefore cannot remove, drop, or delete either topic. Domain
+relationships use the application's own controls and node types.
 
 | Glyph | Means | Paths |
 | --- | --- | --- |
-| minus in a circle | off my side, reversible — removing a link, dropping a topic | `<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12h7"/>` |
+| minus in a circle | off my side, reversible — removing a shortcut or relationship, dropping a topic | `<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12h7"/>` |
 | trash can | gone for everyone | unchanged |
 | `×` | close, never destructive | unchanged — reserved, so it can never be read as either |
 
@@ -563,3 +528,26 @@ surface.
 ## Modal Conventions
 
 - X top-right, click-outside-to-close
+
+## U9 — transition projection
+
+**ACCEPTED, amended 2026-08-20.** A dot is only the temporary, pulsating hint
+that a change is `in_flight`. It disappears when the transmission settles into
+an adoption state. Reduced-motion mode keeps the dot but removes its pulse.
+
+A bounded surface carries adoption state with the stage-coloured quiet wash
+and thickened left edge familiar from the Kanban board: grey while waiting on
+another person, amber while waiting on me, and red for conflict. Settled has
+neither.
+
+A long-dashed one-pixel outline has one meaning: the drawn representation,
+value, or position exists in only one perspective. This covers additions,
+deletions, move ghosts, and alternate scalar values. All four sides have equal
+weight and there is no thickened leading edge. Hover and keyboard focus expose
+Core's full transition sentence.
+
+Core renders reactions with both an icon and words. All controls say
+`Adopt`, `Take back`, or `React`; the tooltip and accessible name carry the
+full action sentence. Every menu item repeats its action icon and full wording.
+`Proposed` is reserved for a real domain proposal, never a generic peer
+revision. These primitives work with or without `SovereignShell`.

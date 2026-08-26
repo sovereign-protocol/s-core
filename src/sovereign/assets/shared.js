@@ -75,10 +75,26 @@ const ICON_AGENDA =
 const ICON_CHANGES =
   '<path d="M4 9h13"></path><path d="M14 6l3 3-3 3"></path>' +
   '<path d="M20 15H7"></path><path d="M10 12l-3 3 3 3"></path>';
+// Reactions are the same acts in every projection. An incoming arrow enters
+// an open boundary; a counter-clockwise arrow takes a local act back; the
+// existing two-way changes mark means the menu contains both kinds.
+const ICON_ADOPT =
+  '<path d="M19 4v16"></path><path d="M5 12h10"></path>' +
+  '<path d="M11 8l4 4-4 4"></path>';
+const ICON_TAKE_BACK =
+  '<path d="M9 7H5v-4"></path><path d="M5 7a8 8 0 1 1-1 8"></path>';
 // Off my side, and reversible. Never the trash can, which destroys for
-// everyone - see DESIGN_TOPIC_LINKS.md and U8.
+// everyone - see DESIGN_NAVIGATION_LINKS.md and U8.
 const ICON_REMOVE =
   '<circle cx="12" cy="12" r="8.5"></circle><path d="M8.5 12h7"></path>';
+// A light open hand: this surface will hold incoming changes for a decision.
+// It is deliberately an outline without a container so policy never looks
+// like a button or compete with an actual transition marker.
+const ICON_HOLD =
+  '<path d="M7.5 11V7.2a1.25 1.25 0 0 1 2.5 0V10"></path>' +
+  '<path d="M10 10V5.8a1.25 1.25 0 0 1 2.5 0V10"></path>' +
+  '<path d="M12.5 10V6.7a1.25 1.25 0 0 1 2.5 0v3.8"></path>' +
+  '<path d="M15 10.5V8.3a1.25 1.25 0 0 1 2.5 0v5.2c0 4-2.2 6.5-6 6.5h-.7c-2 0-3.5-.8-4.6-2.5L3.9 14a1.35 1.35 0 0 1 2-1.8L7.5 14z"></path>';
 
 /*
   Object glyphs (U8). One idea, four strokes, drawn beside a name.
@@ -133,6 +149,43 @@ function entityGlyph(kind) {
   svg.innerHTML =
     `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${paths}</svg>`;
   return svg;
+}
+
+const ACTION_GLYPHS = {
+  adopt: ICON_ADOPT,
+  rollback: ICON_TAKE_BACK,
+  take_back: ICON_TAKE_BACK,
+  react: ICON_CHANGES,
+};
+
+function actionGlyph(kind, className = "") {
+  const paths = ACTION_GLYPHS[kind];
+  if (!paths) return null;
+  const glyph = document.createElement("span");
+  glyph.className = `ui-action-icon ${className}`.trim();
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.innerHTML =
+    `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${paths}</svg>`;
+  return glyph;
+}
+
+function setActionContent(element, label, iconKind, disclosure = false) {
+  element.replaceChildren();
+  const glyph = actionGlyph(iconKind);
+  if (glyph) element.append(glyph);
+  const text = document.createElement("span");
+  text.className = "ui-action-label";
+  text.textContent = label || "";
+  element.append(text);
+  if (disclosure) {
+    const chevron = document.createElement("span");
+    chevron.className = "ui-action-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.innerHTML =
+      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_CHEVRON_DOWN}</svg>`;
+    element.append(chevron);
+  }
+  return element;
 }
 
 function iconButton(svgInner, label, action) {
@@ -541,7 +594,11 @@ const SovereignUI = Object.freeze({
       container.classList.add("ui-reorderable-list");
       container.dataset.reorderAxis = settings.axis === "horizontal" ? "horizontal" : "vertical";
       const ordered = items();
-      for (const item of ordered) item.classList.add("ui-reorderable-item");
+      for (const item of ordered) {
+        item.classList.add("ui-reorderable-item");
+        const id = idOf(item);
+        if (id) item.dataset.reorderId = id;
+      }
       for (const handle of container.querySelectorAll(handles())) {
         const item = itemForHandle(handle);
         if (!item) continue;
@@ -833,7 +890,9 @@ const SovereignUI = Object.freeze({
   actionMenu(options = {}) {
     const button = options.button || document.createElement("button");
     button.type = "button";
-    if (options.label) button.textContent = options.label;
+    if (options.label) {
+      setActionContent(button, options.label, options.iconKind, true);
+    }
     if (options.className) button.classList.add(...options.className.split(/\s+/).filter(Boolean));
     button.setAttribute("aria-haspopup", "menu");
     button.setAttribute("aria-expanded", "false");
@@ -846,6 +905,26 @@ const SovereignUI = Object.freeze({
       else open();
     };
     return {button, open, close};
+  },
+
+  actionButton(options = {}) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `ui-action-button ${options.className || ""}`.trim();
+    setActionContent(
+      button,
+      options.label || "",
+      options.iconKind,
+      Boolean(options.disclosure),
+    );
+    if (options.title) button.title = options.title;
+    if (options.onActivate) {
+      button.onclick = (event) => {
+        event.stopPropagation();
+        options.onActivate(event);
+      };
+    }
+    return button;
   },
 
   // One shape for "there is a difference here, what do you want to do about
@@ -861,10 +940,16 @@ const SovereignUI = Object.freeze({
   reactionControl(options = {}) {
     const choices = reactionChoices(options.info);
     if (!choices.length || !options.onReact) return null;
+    const presentation = reactionPresentation(
+      choices,
+      options.density || "inline",
+    );
     const button = document.createElement("button");
     button.type = "button";
     button.className = `ui-react-button ${options.className || ""}`.trim();
-    button.title = options.title || transitionLabel(options.info);
+    const explanation = choices.map((choice) => choice.label).join("\n");
+    button.title = options.title || explanation || transitionLabel(options.info);
+    button.setAttribute("aria-label", button.title);
     const react = async (choice) => {
       button.disabled = true;
       try {
@@ -876,25 +961,152 @@ const SovereignUI = Object.freeze({
         button.disabled = false;
       }
     };
-    if (choices.length === 1) {
+    if (!presentation.menu) {
       const [only] = choices;
-      button.textContent = only.label;
+      setActionContent(
+        button,
+        presentation.label,
+        presentation.iconKind,
+      );
       button.onclick = (event) => {
         event.stopPropagation();
         react(only);
       };
       return button;
     }
-    button.textContent = options.menuLabel || "React";
-    button.setAttribute("aria-label", "React to differences");
+    setActionContent(
+      button,
+      options.menuLabel || presentation.label,
+      presentation.iconKind,
+      true,
+    );
     this.actionMenu({
       button,
       items: choices.map((choice) => ({
         label: choice.label,
+        iconKind: choice.action,
         onSelect: () => react(choice),
       })),
     });
     return button;
+  },
+
+  reactionPresentation(info, density = "inline") {
+    const choices = Array.isArray(info) ? info : reactionChoices(info);
+    return reactionPresentation(choices, density);
+  },
+
+  // A compact, focusable sign that a change is still travelling. Steady open
+  // states belong to the surface wash and leading edge; callers can explicitly
+  // request other stages when a dot has a separate, local meaning.
+  transitionMarker(info, options = {}) {
+    const visibleInfo = transitionAtStages(
+      info, options.stages || ["in_flight"],
+    );
+    const stage = openTransitionStage(visibleInfo);
+    if (!stage) return null;
+    const marker = document.createElement(options.onActivate ? "button" : "span");
+    if (marker.tagName === "BUTTON") marker.type = "button";
+    marker.className = `ui-transition-marker ${options.className || ""}`.trim();
+    marker.dataset.transitionStage = stage;
+    const label = options.title || transitionLabel(visibleInfo);
+    marker.title = label;
+    marker.setAttribute("aria-label", label);
+    if (!options.onActivate) {
+      marker.tabIndex = 0;
+      marker.setAttribute("role", "img");
+    } else {
+      marker.onclick = (event) => {
+        event.stopPropagation();
+        options.onActivate(visibleInfo);
+      };
+    }
+    return marker;
+  },
+
+  // Decorate an application-owned surface without owning its placement or
+  // workflow. Missing nodes are one-perspective representations by default;
+  // applications can name move ghosts or alternatives explicitly.
+  decorateTransition(element, info, options = {}) {
+    if (!element) return element;
+    if (!element.dataset.transitionDecoration) {
+      element.dataset.transitionDecoration = "true";
+      element.dataset.transitionBaseTitle = element.getAttribute("title") || "";
+    }
+    element.classList.remove("ui-transition-surface");
+    element.classList.remove(
+      "ui-perspective-ghost", "ui-perspective-alternative",
+    );
+    element.querySelector(":scope > .ui-transition-surface-marker")?.remove();
+    delete element.dataset.transitionStage;
+    delete element.dataset.transitionPerspective;
+
+    const stage = openTransitionStage(info);
+    if (!stage) {
+      const baseTitle = element.dataset.transitionBaseTitle || "";
+      if (baseTitle) element.title = baseTitle;
+      else element.removeAttribute("title");
+      return element;
+    }
+
+    element.querySelector(":scope > .ui-adoption-policy-surface-marker")?.remove();
+    delete element.dataset.adoptionPolicy;
+    element.classList.add("ui-transition-surface");
+    element.dataset.transitionStage = stage;
+    const perspective = options.perspective || transitionPerspective(info);
+    if (perspective) {
+      element.dataset.transitionPerspective = perspective;
+      element.classList.add(
+        perspective === "ghost"
+          ? "ui-perspective-ghost"
+          : "ui-perspective-alternative",
+      );
+    }
+    const explanation = options.title || transitionLabel(info);
+    const baseTitle = element.dataset.transitionBaseTitle || "";
+    element.title = options.keepTitle && baseTitle
+      ? `${baseTitle}\n${explanation}`
+      : explanation;
+    if (options.marker !== false) {
+      const marker = this.transitionMarker(info, {
+        className: "ui-transition-surface-marker",
+        title: explanation,
+        onActivate: options.onActivate,
+      });
+      if (marker) element.append(marker);
+    }
+    return element;
+  },
+
+  adoptionPolicyMarker(policy, options = {}) {
+    const adopt = typeof policy === "string" ? policy : policy?.adopt;
+    if (adopt !== "hold" || openTransitionStage(options.transition)) return null;
+    const marker = document.createElement("span");
+    marker.className = `ui-adoption-policy-marker ${options.className || ""}`.trim();
+    marker.title = options.title || "Changes here wait for your approval.";
+    marker.setAttribute("aria-label", marker.title);
+    marker.setAttribute("role", "img");
+    marker.tabIndex = 0;
+    marker.innerHTML =
+      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_HOLD}</svg>`;
+    return marker;
+  },
+
+  // Policy and state are orthogonal: the hand explains what would happen to
+  // a future change, while transition decoration explains one that exists.
+  // The latter always wins, so the surface never accumulates both signals.
+  decorateAdoptionPolicy(element, policy, options = {}) {
+    if (!element) return element;
+    element.querySelector(":scope > .ui-adoption-policy-surface-marker")?.remove();
+    delete element.dataset.adoptionPolicy;
+    const marker = this.adoptionPolicyMarker(policy, {
+      ...options,
+      className: "ui-adoption-policy-surface-marker",
+    });
+    if (!marker) return element;
+    element.dataset.adoptionPolicy = "hold";
+    element.append(marker);
+    return element;
   },
 });
 
@@ -942,6 +1154,11 @@ function dedupe(items) {
   return [...new Set(items)];
 }
 
+function joinWords(items) {
+  if (items.length < 2) return items[0] || "";
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
 // Pages that model people define peerLabel(); ones that do not - a minimal
 // application, or any page before its first load - must still be able to
 // render a transition rather than throwing a ReferenceError.
@@ -954,10 +1171,8 @@ function safePeerLabel(addr) {
 // Distinct from transitionActorLabel, which names the peer on the other end
 // of the comparison: a rollback target is "my previous version held by
 // <peer>", so that wording needs the counterpart even when I am the author.
-const LOCALLY_AUTHORED_TYPES = ["local_made_changes", "peer_missing_node"];
-
 function transitionAuthorLabel(info) {
-  if (LOCALLY_AUTHORED_TYPES.includes(info?.type)) return "me";
+  if (info?.authored_locally === true) return "me";
   return transitionActorLabel(info);
 }
 
@@ -981,15 +1196,8 @@ function authoredPhrase(info, author) {
 }
 
 function transitionActorLabel(info) {
-  const sourceType = info.type;
-  const originDescribesIncomingRevision = [
-    "peer_made_changes",
-    "local_missing_node",
-    "divergence",
-  ].includes(sourceType);
   if (
-    originDescribesIncomingRevision &&
-    info.origin_identity &&
+    info?.origin_identity &&
     typeof userForParticipant === "function"
   ) {
     const user = userForParticipant(info.origin_identity);
@@ -1090,14 +1298,20 @@ function transitionReactionLabel(event) {
   const changes = event?.changes || [];
   const nouns = dedupe(changes.map((c) => c.authored_noun).filter(Boolean));
   const node = changes.find((c) => c.node_label)?.node_label || "item";
-  const what = `${node.toLowerCase()} ${nouns.join(" and ") || "change"}`;
+  const fields = dedupe(changes
+    .map((change) => String(change.authored_detail || "").replace(/ changed$/, ""))
+    .filter(Boolean));
+  const modificationOnly = nouns.length === 1 && nouns[0] === "modification";
+  const what = modificationOnly && fields.length
+    ? `${node.toLowerCase()} ${joinWords(fields)} ${fields.length === 1 ? "change" : "changes"}`
+    : `${node.toLowerCase()} ${nouns.join(" and ") || "change"}`;
   // Worded by who authored the change, not by which endpoint settles it.
   // Those differ: undoing my own edit is served by adopting the version a
   // peer still holds, which is a rollback to me however it is implemented,
   // and "Adopt card move from me" describes the mechanism at the reader.
-  return LOCALLY_AUTHORED_TYPES.includes(event?.type) || event?.reaction === "rollback"
-    ? `Take back my ${what}`
-    : `Adopt ${what} from ${transitionAuthorLabel(event)}`;
+  if (event?.reaction === "rollback") return `Take back my ${what}`;
+  if (event?.authored_locally === true) return `Adopt my ${what}`;
+  return `Adopt ${what} from ${transitionAuthorLabel(event)}`;
 }
 
 // Every act available on one node, one per contributing peer. A transition
@@ -1124,6 +1338,50 @@ function reactionChoices(info) {
     absent: event.type === "peer_missing_node",
     event,
   }));
+}
+
+function reactionPresentation(choices, density = "inline") {
+  const available = (choices || []).filter(Boolean);
+  if (!available.length) {
+    return {menu: false, label: "", iconKind: "react"};
+  }
+  const allAdopt = available.every((choice) => choice.action === "adopt");
+  const allTakeBack = available.every((choice) => choice.action === "rollback");
+  const iconKind = allAdopt ? "adopt" : allTakeBack ? "rollback" : "react";
+  const shortLabel = allAdopt ? "Adopt" : allTakeBack ? "Take back" : "React";
+  return {
+    menu: available.length > 1,
+    iconKind,
+    label: shortLabel,
+  };
+}
+
+const OPEN_TRANSITION_STAGES = new Set([
+  "in_flight", "awaiting_peer", "awaiting_me", "conflict",
+]);
+
+function openTransitionStage(info) {
+  if (!info) return null;
+  if (OPEN_TRANSITION_STAGES.has(info.stage)) return info.stage;
+  return (info.events || []).find(
+    (event) => OPEN_TRANSITION_STAGES.has(event?.stage),
+  )?.stage || null;
+}
+
+function transitionAtStages(info, stages) {
+  if (!info || !Array.isArray(stages) || !stages.length) return info;
+  const accepted = new Set(stages);
+  if (accepted.has(openTransitionStage(info))) return info;
+  return (info.events || []).find(
+    (event) => accepted.has(openTransitionStage(event)),
+  ) || null;
+}
+
+function transitionPerspective(info) {
+  const types = [info?.type, ...(info?.events || []).map((event) => event?.type)];
+  return types.some((type) => ["local_missing_node", "peer_missing_node"].includes(type))
+    ? "one-sided"
+    : "";
 }
 
 // One body-level popup serves every action menu. Applications provide only
@@ -1231,7 +1489,7 @@ function openActionMenu(anchor, items = [], options = {}) {
     if (item.checked !== undefined) {
       choice.setAttribute("aria-checked", String(Boolean(item.checked)));
     }
-    choice.textContent = item.label;
+    setActionContent(choice, item.label, item.iconKind);
     choice.disabled = Boolean(item.disabled);
     choice.onclick = async (event) => {
       event.stopPropagation();
@@ -1285,6 +1543,9 @@ const SovereignShell = {
   _options: {},
   _headerSharingTopic: "",
   _headerSharingPendingTopic: "",
+  _navigation: {links: [], candidates: []},
+  _navigationTopic: "",
+  _navigationPendingTopic: "",
 
   async applications() {
     if (this._applications) return this._applications;
@@ -1327,6 +1588,7 @@ const SovereignShell = {
     // The Cockpit entry on the navigation row is composed from what the host
     // reports, so the row cannot be drawn until that has arrived.
     this._renderTopicContext();
+    this.refreshNavigationLinks();
     this.refresh();
     this.refreshAvatar();
     if (!this._sharingRefreshTimer) {
@@ -1338,6 +1600,7 @@ const SovereignShell = {
   },
 
   refresh() {
+    this.refreshNavigationLinks();
     this.refreshDisagreements();
     this.refreshSharingHeader();
     this.refreshCollaborationPane();
@@ -1714,6 +1977,7 @@ Object.assign(SovereignShell, {
       },
     });
     this._renderTopicContext();
+    if (this._navigationTopic !== this._topic()) this.refreshNavigationLinks();
     // Re-attached here rather than only once at mount: this method builds
     // the region's contents on first use, so anything appended before that
     // would be lost with them.
@@ -1732,32 +1996,49 @@ Object.assign(SovereignShell, {
     return `${application.asset_prefix}?topic=${encodeURIComponent(topicUuid)}`;
   },
 
-  // What this topic is attached to: the team an initiative belongs to, the
-  // flows it runs, the work a team has taken on. Core draws them and carries
-  // out the two acts that are Core's - taking up a reference you do not hold
-  // yet, and removing one. The application says which links exist and what
-  // making one calls; it does not say who may remove one, because that is
-  // not a rule anybody sets: a link is adopted same-origin, so the only one
-  // you can take off is the one you put up.
-  //
-  // Only links on the topic itself belong here. A card naming the process it
-  // waits on belongs beside the card - in the bar it would be a fact about
-  // something you cannot see.
-  //
-  // links  [{uuid, topic_uuid, application_id, label, title, held, mine}]
-  // make   [{label, onSelect}] - a kind that can be made and linked at once
-  // link   [{label, onSelect}] - one of your own topics, not referenced here
-  //
-  // U7 split this in two. Going somewhere is the switcher menu beside the
-  // name; managing what this is attached to - taking up a reference, letting
-  // one go, making a new one - is the dialog behind "Link related...". They
-  // were one row of chips because navigating and administering look alike
-  // from the outside; they are different frames, and the frame you enter
-  // deliberately is the one that stays closed.
-  setTopicLinks(options = {}) {
-    this._topicLinks = options;
-    this._renderTopicContext();
-    if (document.getElementById("shellRelateDialog")?.open) this._renderRelateDialog();
+  // Under-title destinations are local shortcuts. Core reads its private
+  // session metadata directly; applications neither supply these links nor
+  // turn them into domain nodes. Adding one cannot publish, adopt, or grant
+  // access to anything.
+  async refreshNavigationLinks() {
+    const topic = this._topic();
+    if (!topic) {
+      this._navigationTopic = "";
+      this._navigation = {links: [], candidates: []};
+      this._renderTopicContext();
+      return;
+    }
+    if (this._navigationPendingTopic === topic) return;
+    if (this._navigationTopic !== topic) {
+      this._navigationTopic = topic;
+      this._navigation = {links: [], candidates: []};
+      this._renderTopicContext();
+    }
+    this._navigationPendingTopic = topic;
+    try {
+      const response = await fetch(
+        `/api/core/navigation/${encodeURIComponent(topic)}`,
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.reason || "Could not read navigation links.");
+      }
+      if (this._topic() === topic) {
+        this._navigation = {
+          links: payload.links || [],
+          candidates: payload.candidates || [],
+        };
+        this._renderTopicContext();
+        if (document.getElementById("shellRelateDialog")?.open) {
+          this._renderRelateDialog();
+        }
+      }
+    } catch (error) {
+      // Navigation is optional. A transient read error must not break the
+      // topic header or turn a local convenience into an application error.
+    } finally {
+      if (this._navigationPendingTopic === topic) this._navigationPendingTopic = "";
+    }
   },
 
   // Beneath the name: where else you can go, nearest range first. What this
@@ -1784,7 +2065,7 @@ Object.assign(SovereignShell, {
     if (current && current.role === "aggregator") return;
     if (!this._options.topicUuid || !this._topic()) return;
 
-    const held = ((this._topicLinks || {}).links || []).filter((link) => link.held);
+    const held = this._navigation.links || [];
     // Only the names shrink. The controls after them are `flex: none`, so a
     // long list truncates itself rather than pushing them off the bar.
     const names = document.createElement("div");
@@ -1808,8 +2089,8 @@ Object.assign(SovereignShell, {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "shell-related-menu";
-    more.title = "Related";
-    more.setAttribute("aria-label", "Related");
+    more.title = "Navigation links";
+    more.setAttribute("aria-label", "Navigation links");
     more.innerHTML =
       `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_CHEVRON_DOWN}</svg>`;
     this._buildRelatedMenu(more);
@@ -1857,10 +2138,10 @@ Object.assign(SovereignShell, {
       // Read when the menu opens, not when the button was made: what this is
       // attached to changes with every sync.
       items: () => {
-        const links = ((this._topicLinks || {}).links || []).filter((link) => link.held);
+        const links = this._navigation.links || [];
         const items = [];
         if (links.length) {
-          items.push({heading: "Related"});
+          items.push({heading: "Navigation"});
           for (const link of links) {
             items.push({
               label: link.title || "Untitled",
@@ -1872,22 +2153,21 @@ Object.assign(SovereignShell, {
           }
           items.push({separator: true});
         }
-        items.push({label: "Link related…", onSelect: () => this.openRelateDialog()});
+        items.push({label: "Manage links…", onSelect: () => this.openRelateDialog()});
         return items;
       },
     });
   },
 
-  // Everything about what this topic is attached to that is not going there:
-  // taking up a reference somebody else made, letting one of mine go, and
-  // making a new one.
+  // Manage only this client's shortcuts. Domain relationships are rendered
+  // and edited by the owning application in its own content area.
   openRelateDialog() {
     if (!this._relateReady) {
       const host = document.createElement("div");
       host.innerHTML = [
         '<dialog id="shellRelateDialog" class="shell-dialog">',
         '<div class="shell-pane-header">',
-        "<strong>Related</strong>",
+        "<strong>Navigation links</strong>",
         '<button type="button" id="shellRelateClose" class="shell-pane-close" aria-label="Close">&times;</button>',
         "</div>",
         '<div class="shell-dialog-body">',
@@ -1908,27 +2188,28 @@ Object.assign(SovereignShell, {
     const rows = document.getElementById("shellRelateRows");
     const actions = document.getElementById("shellRelateActions");
     if (!rows) return;
-    const current = this._topicLinks || {};
+    const current = this._navigation || {};
     rows.replaceChildren();
     const links = current.links || [];
     if (!links.length) {
       const empty = document.createElement("p");
       empty.className = "shell-note";
-      empty.textContent = "Nothing is linked to this yet.";
+      empty.textContent = "No local navigation links yet.";
       rows.append(empty);
     }
     for (const link of links) rows.append(this._relateRow(link));
 
     actions.replaceChildren();
-    const offers = [...(current.make || []), ...(current.link || [])].filter(Boolean);
-    for (const offer of offers) {
+    for (const candidate of current.candidates || []) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ui-button";
-      button.textContent = offer.label;
+      button.textContent = `Add ${candidate.title || "Untitled"}`;
+      button.title = candidate.label || "Topic";
       button.onclick = async () => {
-        document.getElementById("shellRelateDialog").close();
-        await offer.onSelect(offer);
+        await this._navigationMutation({
+          action: "add", topic_uuid: candidate.topic_uuid,
+        });
       };
       actions.append(button);
     }
@@ -1936,7 +2217,7 @@ Object.assign(SovereignShell, {
 
   _relateRow(link) {
     const row = document.createElement("div");
-    row.className = `shell-link-row${link.held ? "" : " unheld"}`;
+    row.className = "shell-link-row";
 
     const label = document.createElement("span");
     label.className = "shell-link-label";
@@ -1950,37 +2231,27 @@ Object.assign(SovereignShell, {
     const act = document.createElement("button");
     act.type = "button";
     act.className = "ui-button shell-link-act";
-    if (link.held) {
-      // One reference, gone. What it points at is untouched, and so is
-      // everybody else's reference to it - which is why this asks nothing.
-      // The minus, never the trash can: this is off my side, not destroyed.
-      act.innerHTML =
-        `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
-      act.title = "Remove from my Cockpit. What it points at is kept";
-      act.setAttribute("aria-label", "Remove from my Cockpit");
-      act.hidden = link.mine === false;
-      act.onclick = async () => {
-        await this._actOnTopicLink("onRemove", link);
-        this._renderRelateDialog();
-      };
-    } else {
-      // Not broken - an invitation. Following it reaches only what a peer is
-      // already publishing here, so it resolves or it says nobody is.
-      act.textContent = "Add to Cockpit";
-      act.onclick = async () => {
-        await this._actOnTopicLink("onFollow", link);
-        this._renderRelateDialog();
-      };
-    }
+    act.innerHTML =
+      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
+    act.title = "Remove local navigation link";
+    act.setAttribute("aria-label", "Remove local navigation link");
+    act.onclick = async () => {
+      await this._navigationMutation({action: "remove", link_uuid: link.uuid});
+    };
     row.append(act);
     return row;
   },
 
-  async _actOnTopicLink(kind, link) {
-    const handler = (this._topicLinks || {})[kind];
-    if (!handler) return;
+  async _navigationMutation(body) {
+    const topic = this._topic();
+    if (!topic) return;
     try {
-      await handler(link);
+      await this._post(
+        `/api/core/navigation/${encodeURIComponent(topic)}`, body,
+      );
+      this._navigationTopic = "";
+      await this.refreshNavigationLinks();
+      await this._changed();
     } catch (error) {
       showToast(error.message, true);
     }
@@ -2402,15 +2673,20 @@ Object.assign(SovereignShell, {
     for (const item of items) {
       const row = document.createElement("div");
       row.className = "shell-disagreement-row";
-      row.dataset.status = item.stage;
+      SovereignUI.decorateTransition(row, item, {marker: false});
+      const summary = document.createElement("div");
+      summary.className = "shell-disagreement-summary";
+      const marker = SovereignUI.transitionMarker(item);
+      if (marker) summary.append(marker);
       const label = document.createElement("span");
       label.className = "shell-disagreement-label";
       label.textContent = transitionLabel(item);
+      summary.append(label);
       const where = document.createElement("span");
       where.className = "shell-note";
       const describe = this._options.describeNode;
       where.textContent = describe ? describe(item.node_uuid) || "" : "";
-      row.append(label, where);
+      row.append(summary, where);
       const actions = document.createElement("div");
       actions.className = "shell-disagreement-actions";
       if (this._options.revealNode) {
@@ -2434,6 +2710,7 @@ Object.assign(SovereignShell, {
       if (this._options.reactNode && reactable) {
         const control = SovereignUI.reactionControl({
           info: item,
+          density: "review",
           onReact: (choice) => this._options.reactNode(item.node_uuid, choice),
         });
         if (control) actions.append(control);
@@ -2799,7 +3076,7 @@ Object.assign(SovereignShell, {
     const {select, control} = SovereignUI.selectionControl({
       items: modes.map((mode) => [mode, labels[mode] || mode]),
       value: state.auto_adopt_mode || "always",
-      ariaLabel: "Automatic adoption",
+      ariaLabel: this._options.autoAdoptHeading || "Automatic adoption",
       onChange: async () => {
         renderSelection();
         try {
@@ -2842,6 +3119,10 @@ Object.assign(SovereignShell, {
     this._renderDisagreementList(document.getElementById("shellDisagreementList"));
     const adoptSection = document.getElementById("shellCollabAutoAdopt");
     const adoptControl = document.getElementById("shellCollabAutoAdoptControl");
+    const adoptTitle = adoptSection?.querySelector("h4");
+    if (adoptTitle) {
+      adoptTitle.textContent = this._options.autoAdoptHeading || "Incoming changes";
+    }
     adoptControl.replaceChildren();
     const adopt = this._autoAdoptControl();
     if (adopt) adoptControl.append(adopt);

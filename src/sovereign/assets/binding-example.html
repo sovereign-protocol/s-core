@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Headless Sovereign Field</title>
+    <link rel="stylesheet" href="/shared.css" />
+    <style>
+      body { max-width: 44rem; margin: 3rem auto; padding: 0 1rem; font: 16px system-ui; }
+      form, label { display: grid; gap: .5rem; }
+      form { gap: 1rem; }
+      input, textarea, button { box-sizing: border-box; padding: .65rem; font: inherit; }
+      textarea { min-height: 10rem; width: 100%; }
+      .ui-bound-field { padding: .75rem; border: 1px solid #8c9bab; border-radius: .5rem; }
+      .ui-bound-field-reactions { display: flex; justify-content: flex-end; margin-top: .5rem; }
+      #status { min-height: 1.5rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Headless Sovereign field</h1>
+    <p>This ordinary page uses Core binding and transition primitives without the shell.</p>
+    <form id="connectForm">
+      <label>Topic UUID <input id="topicUuid" required /></label>
+      <label>Node UUID <input id="nodeUuid" required /></label>
+      <label>Capability <input id="capability" type="password" required /></label>
+      <button>Connect</button>
+    </form>
+    <label>Shared text <textarea id="sharedText" disabled></textarea></label>
+    <p id="status" role="status"></p>
+    <script src="/shared.js"></script>
+    <script src="/sovereign-client.js"></script>
+    <script>
+      document.getElementById("connectForm").onsubmit = async (event) => {
+        event.preventDefault();
+        const field = document.getElementById("sharedText");
+        const status = document.getElementById("status");
+        const client = await SovereignClient.connect({
+          baseUrl: location.origin,
+          capability: document.getElementById("capability").value,
+        });
+        field.disabled = false;
+        client.bindField(field, {
+          topicUuid: document.getElementById("topicUuid").value,
+          nodeUuid: document.getElementById("nodeUuid").value,
+          field: "text",
+          onError: (error) => { status.textContent = error?.message || "Connected"; },
+        });
+        event.currentTarget.hidden = true;
+      };
+    </script>
+  </body>
+</html>
