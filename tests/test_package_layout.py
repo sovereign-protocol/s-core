@@ -490,14 +490,29 @@ class ShellLayoutTests(unittest.TestCase):
 
     def test_title_links_are_local_navigation_only(self):
         self.assertIn("/api/core/navigation/", SHARED_JS)
-        self.assertIn("No local navigation links yet.", SHARED_JS)
         self.assertNotIn("Add to Cockpit", SHARED_JS)
         self.assertNotIn("onFollow", SHARED_JS)
         related = SHARED_JS.split("_buildRelatedMenu(button) {", 1)[1].split(
             "\n  },", 1,
         )[0]
-        self.assertIn("this._navigation.links", related)
-        self.assertIn("Manage links", related)
+        self.assertIn("this._connectedDestinations()", related)
+        self.assertIn("Manage connections", related)
+
+    def test_connected_work_merges_with_navigation_links_not_beside_them(self):
+        """One row, one dialog, one menu - a topic connected both ways draws
+        once, as the richer connected-work fact, per DESIGN_NAVIGATION_LINKS.md."""
+        self.assertIn("/api/core/relationships/", SHARED_JS)
+        self.assertIn("Nothing connected yet.", SHARED_JS)
+        merge = SHARED_JS.split("_connectedDestinations() {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("item.held", merge)
+        self.assertIn("seen.has(item.topic_uuid)", merge)
+        dialog = SHARED_JS.split("_renderRelateDialog() {", 1)[1].split(
+            "\n  _relateHeading", 1,
+        )[0]
+        for heading in ("Connected work", "Already here", "Your other items"):
+            self.assertIn(heading, dialog)
 
     def test_the_navigation_row_orders_destinations_by_range(self):
         """Nearest first, widest last, with a rule where the range changes.

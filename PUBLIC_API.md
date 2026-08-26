@@ -141,10 +141,13 @@ version, a per-kind template lookup and a create path per kind — all of them
 restating what the owning application already knew, and drifting: one could
 start a team from a file and another could not.
 
-## Local navigation links
+## Navigation links and connected work
 
-The shortcuts below a topic title are Core-owned local metadata, not protocol
-nodes. Both ends must already be held and registered here.
+The under-title row and its dialog draw two Core-owned kinds of connection
+side by side. See `DESIGN_NAVIGATION_LINKS.md` for the full design.
+
+**Navigation links** are local metadata, not protocol nodes. Both ends must
+already be held and registered here.
 
 - `create_navigation_link(parent_uuid, topic_uuid)` adds a shortcut without a
   protocol revision or network effect.
@@ -158,8 +161,27 @@ Dropping either endpoint clears matching shortcuts and is never blocked by
 them. The shared browser shell exposes the same operations at
 `GET/POST /api/core/navigation/{topic_uuid}`.
 
-Applications own semantic relationships as their own node types and render
-them in their own content areas. See `DESIGN_NAVIGATION_LINKS.md`.
+**Connected work** (`sovereign_relationship`, `RelationshipService` in
+`relationships.py`) is the opposite on every count: a real protocol node,
+per-actor authored, and shared wherever the source topic already publishes.
+
+- `create_relationship(parent_uuid, topic_uuid)` connects an already-held
+  topic, running any registered `validate_relationship` hook first.
+- `create_and_share_topic(parent_uuid, application_id, title, template, snapshot)`
+  makes a new topic and connects it, bridged to wherever the source
+  publishes.
+- `connect_relationship(parent_uuid, topic_uuid)` joins a topic somebody
+  else already connected, and adds this actor's own connection to it.
+- `relationships(parent_uuid)` is the union view: live while any actor's
+  connection to that target survives.
+- `remove_relationship(parent_uuid, relationship_uuid)` removes only this
+  actor's own connection.
+- `relationship_candidates(parent_uuid)` splits into `shared` (already on
+  this bridge) and `own` (this client's other items, of a registered kind,
+  not yet shared here).
+
+The shared browser shell exposes the same operations at
+`GET/POST /api/core/relationships/{topic_uuid}`.
 
 ## Channel extension API
 

@@ -36,6 +36,12 @@ class ApplicationRegistration:
                       new topic. All three ways of starting are its own: from
                       nothing, from a template it listed, or from a snapshot
                       document it exported.
+    `validate_relationship` optional (parent, target) -> SessionResult | None,
+                      asked before Core connects two of this application's
+                      topics. `None`, or an "ok" result, allows it; any other
+                      result is the refusal reason. Absent means Core asks
+                      nothing beyond its own mechanical checks - most
+                      applications have no domain rule to enforce here.
     """
 
     application_id: str
@@ -49,6 +55,7 @@ class ApplicationRegistration:
     template_required: bool = False
     list_templates: Callable[[], Iterable[dict]] | None = None
     create_topic: Callable[[str, str, dict | None], Any] | None = None
+    validate_relationship: Callable[[ProtocolNode, ProtocolNode], Any] | None = None
 
 
 SharedTopicHandler = ApplicationRegistration

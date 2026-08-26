@@ -1996,37 +1996,55 @@ Object.assign(SovereignShell, {
     return `${application.asset_prefix}?topic=${encodeURIComponent(topicUuid)}`;
   },
 
-  // Under-title destinations are local shortcuts. Core reads its private
-  // session metadata directly; applications neither supply these links nor
-  // turn them into domain nodes. Adding one cannot publish, adopt, or grant
-  // access to anything.
+  // Under-title destinations are two things at once now: local shortcuts
+  // (Core's private session metadata, never published, adopted, or a grant
+  // of access) and connected work (`sovereign_relationship`, an ordinary
+  // adopted node that also shares the target wherever this topic already
+  // publishes). One combined read, one combined dialog - "where can I go"
+  // and "what work is connected here" were the same duplicated question.
+  _EMPTY_NAVIGATION() {
+    return {
+      links: [], candidates: [],
+      relationships: [], shared_candidates: [], own_candidates: [], kinds: [],
+    };
+  },
+
   async refreshNavigationLinks() {
     const topic = this._topic();
     if (!topic) {
       this._navigationTopic = "";
-      this._navigation = {links: [], candidates: []};
+      this._navigation = this._EMPTY_NAVIGATION();
       this._renderTopicContext();
       return;
     }
     if (this._navigationPendingTopic === topic) return;
     if (this._navigationTopic !== topic) {
       this._navigationTopic = topic;
-      this._navigation = {links: [], candidates: []};
+      this._navigation = this._EMPTY_NAVIGATION();
       this._renderTopicContext();
     }
     this._navigationPendingTopic = topic;
     try {
-      const response = await fetch(
-        `/api/core/navigation/${encodeURIComponent(topic)}`,
-      );
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.reason || "Could not read navigation links.");
+      const [linksResponse, workResponse] = await Promise.all([
+        fetch(`/api/core/navigation/${encodeURIComponent(topic)}`),
+        fetch(`/api/core/relationships/${encodeURIComponent(topic)}`),
+      ]);
+      const links = await linksResponse.json();
+      const work = await workResponse.json();
+      if (!linksResponse.ok) {
+        throw new Error(links.reason || "Could not read navigation links.");
+      }
+      if (!workResponse.ok) {
+        throw new Error(work.reason || "Could not read connected work.");
       }
       if (this._topic() === topic) {
         this._navigation = {
-          links: payload.links || [],
-          candidates: payload.candidates || [],
+          links: links.links || [],
+          candidates: links.candidates || [],
+          relationships: work.relationships || [],
+          shared_candidates: work.shared_candidates || [],
+          own_candidates: work.own_candidates || [],
+          kinds: work.kinds || [],
         };
         this._renderTopicContext();
         if (document.getElementById("shellRelateDialog")?.open) {
@@ -2065,7 +2083,7 @@ Object.assign(SovereignShell, {
     if (current && current.role === "aggregator") return;
     if (!this._options.topicUuid || !this._topic()) return;
 
-    const held = this._navigation.links || [];
+    const held = this._connectedDestinations();
     // Only the names shrink. The controls after them are `flex: none`, so a
     // long list truncates itself rather than pushing them off the bar.
     const names = document.createElement("div");
@@ -2082,15 +2100,15 @@ Object.assign(SovereignShell, {
     }
     context.append(names);
 
-    // Always present, never a count. "Link related…" has to be reachable
+    // Always present, never a count. "Connected…" has to be reachable
     // whether or not anything overflowed, and a control that appears only
     // sometimes is one nobody learns. Its menu lists every related topic, so
     // overflow is not a case the reader has to be told about.
     const more = document.createElement("button");
     more.type = "button";
     more.className = "shell-related-menu";
-    more.title = "Navigation links";
-    more.setAttribute("aria-label", "Navigation links");
+    more.title = "Connected";
+    more.setAttribute("aria-label", "Connected");
     more.innerHTML =
       `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_CHEVRON_DOWN}</svg>`;
     this._buildRelatedMenu(more);
@@ -2117,20 +2135,42 @@ Object.assign(SovereignShell, {
     }
   },
 
+  // A local shortcut and a held connected-work item read the same way on
+  // this row - both are just "somewhere you can go" - so they merge into
+  // one list rather than drawing two. A topic connected both ways shows
+  // once, as the connected-work entry: it carries the fuller fact.
+  _connectedDestinations() {
+    const work = (this._navigation.relationships || []).filter(
+      (item) => item.held,
+    );
+    const seen = new Set(work.map((item) => item.topic_uuid));
+    const links = (this._navigation.links || []).filter(
+      (item) => !seen.has(item.topic_uuid),
+    );
+    return [...work, ...links].sort(
+      (a, b) => (a.title || "").localeCompare(b.title || ""),
+    );
+  },
+
   _contextLink(link) {
     const href = this.topicHref(link.application_id, link.topic_uuid);
     const anchor = document.createElement("a");
     anchor.className = "shell-context-link";
     anchor.textContent = link.title || "Untitled";
-    anchor.title = link.label ? `${link.label}: ${anchor.textContent}` : anchor.textContent;
+    // `mine` only exists on a connected-work row - a relationship, shared
+    // wherever this topic already publishes - never on a plain shortcut.
+    const label = link.mine === undefined
+      ? link.label
+      : `${link.label}, connected work`;
+    anchor.title = label ? `${label}: ${anchor.textContent}` : anchor.textContent;
     if (href) anchor.href = href;
     return anchor;
   },
 
-  // Every related topic, whether or not it fitted on the row, and the one
-  // act that is not a destination. References you have not taken up are
-  // deliberately absent: taking one up is an act, and it lives in the dialog
-  // with the other acts rather than among places to go.
+  // Every connected destination, whether or not it fitted on the row, and
+  // the one act that is not a destination. References you have not taken up
+  // are deliberately absent: taking one up is an act, and it lives in the
+  // dialog with the other acts rather than among places to go.
   _buildRelatedMenu(button) {
     SovereignUI.actionMenu({
       button,
@@ -2138,11 +2178,11 @@ Object.assign(SovereignShell, {
       // Read when the menu opens, not when the button was made: what this is
       // attached to changes with every sync.
       items: () => {
-        const links = this._navigation.links || [];
+        const destinations = this._connectedDestinations();
         const items = [];
-        if (links.length) {
-          items.push({heading: "Navigation"});
-          for (const link of links) {
+        if (destinations.length) {
+          items.push({heading: "Connected"});
+          for (const link of destinations) {
             items.push({
               label: link.title || "Untitled",
               onSelect: () => {
@@ -2153,26 +2193,31 @@ Object.assign(SovereignShell, {
           }
           items.push({separator: true});
         }
-        items.push({label: "Manage links…", onSelect: () => this.openRelateDialog()});
+        items.push({label: "Manage connections…", onSelect: () => this.openRelateDialog()});
         return items;
       },
     });
   },
 
-  // Manage only this client's shortcuts. Domain relationships are rendered
-  // and edited by the owning application in its own content area.
+  // One dialog for both: connected work (`sovereign_relationship`, shared
+  // wherever this topic already publishes) and plain local shortcuts. A
+  // work item's own remove/connect acts sit on its row; new connections are
+  // offered in three groups below, matching what's actually different about
+  // each - already reaching the same people, yours to share, or brand new.
   openRelateDialog() {
     if (!this._relateReady) {
       const host = document.createElement("div");
       host.innerHTML = [
         '<dialog id="shellRelateDialog" class="shell-dialog">',
         '<div class="shell-pane-header">',
-        "<strong>Navigation links</strong>",
+        "<strong>Connected</strong>",
         '<button type="button" id="shellRelateClose" class="shell-pane-close" aria-label="Close">&times;</button>',
         "</div>",
         '<div class="shell-dialog-body">',
         '<div id="shellRelateRows" class="shell-link-rows"></div>',
-        '<div id="shellRelateActions" class="shell-row"></div>',
+        '<div id="shellRelateShared" class="shell-row"></div>',
+        '<div id="shellRelateOwn" class="shell-row"></div>',
+        '<div id="shellRelateNew" class="shell-row"></div>',
         "</div></dialog>",
       ].join("");
       document.body.append(...host.children);
@@ -2186,60 +2231,169 @@ Object.assign(SovereignShell, {
 
   _renderRelateDialog() {
     const rows = document.getElementById("shellRelateRows");
-    const actions = document.getElementById("shellRelateActions");
     if (!rows) return;
     const current = this._navigation || {};
     rows.replaceChildren();
+    const work = current.relationships || [];
     const links = current.links || [];
-    if (!links.length) {
+    if (!work.length && !links.length) {
       const empty = document.createElement("p");
       empty.className = "shell-note";
-      empty.textContent = "No local navigation links yet.";
+      empty.textContent = "Nothing connected yet.";
       rows.append(empty);
     }
-    for (const link of links) rows.append(this._relateRow(link));
+    if (work.length) {
+      rows.append(this._relateHeading("Connected work"));
+      for (const item of work) rows.append(this._relateRow(item, true));
+    }
+    if (links.length) {
+      rows.append(this._relateHeading("Other links"));
+      for (const link of links) rows.append(this._relateRow(link, false));
+    }
 
-    actions.replaceChildren();
-    for (const candidate of current.candidates || []) {
+    this._renderRelateGroup(
+      "shellRelateShared", "Already here", current.shared_candidates || [],
+      (candidate) => this._connectMutation({
+        action: "add", topic_uuid: candidate.topic_uuid,
+      }),
+    );
+    this._renderRelateGroup(
+      "shellRelateOwn", "Your other items", current.own_candidates || [],
+      (candidate) => this._connectMutation({
+        action: "connect", topic_uuid: candidate.topic_uuid,
+      }),
+    );
+
+    const newHost = document.getElementById("shellRelateNew");
+    newHost.replaceChildren();
+    const kinds = current.kinds || [];
+    if (kinds.length) newHost.append(this._relateHeading("New"));
+    for (const kind of kinds) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ui-button";
+      button.textContent = `New ${kind.noun}`;
+      button.onclick = () => this._openNewConnectedTopic(kind);
+      newHost.append(button);
+    }
+  },
+
+  _relateHeading(text) {
+    const heading = document.createElement("p");
+    heading.className = "shell-note shell-relate-heading";
+    heading.textContent = text;
+    return heading;
+  },
+
+  _renderRelateGroup(hostId, heading, candidates, onSelect) {
+    const host = document.getElementById(hostId);
+    if (!host) return;
+    host.replaceChildren();
+    if (!candidates.length) return;
+    host.append(this._relateHeading(heading));
+    for (const candidate of candidates) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ui-button";
       button.textContent = `Add ${candidate.title || "Untitled"}`;
       button.title = candidate.label || "Topic";
-      button.onclick = async () => {
-        await this._navigationMutation({
-          action: "add", topic_uuid: candidate.topic_uuid,
-        });
-      };
-      actions.append(button);
+      button.onclick = () => onSelect(candidate);
+      host.append(button);
     }
   },
 
-  _relateRow(link) {
+  // `work` distinguishes a connected-work row (its own connect/remove acts,
+  // shared wherever this topic already publishes) from a plain local
+  // shortcut (remove only - it never claimed to share anything).
+  _relateRow(item, work) {
     const row = document.createElement("div");
     row.className = "shell-link-row";
 
     const label = document.createElement("span");
     label.className = "shell-link-label";
-    label.textContent = link.label || "";
+    label.textContent = item.label || "";
 
     const title = document.createElement("span");
     title.className = "shell-link-title";
-    title.textContent = String(link.title || "Untitled");
+    title.textContent = String(item.title || "Untitled");
     row.append(label, title);
 
-    const act = document.createElement("button");
-    act.type = "button";
-    act.className = "ui-button shell-link-act";
-    act.innerHTML =
-      `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
-    act.title = "Remove local navigation link";
-    act.setAttribute("aria-label", "Remove local navigation link");
-    act.onclick = async () => {
-      await this._navigationMutation({action: "remove", link_uuid: link.uuid});
-    };
-    row.append(act);
+    if (!work) {
+      const act = document.createElement("button");
+      act.type = "button";
+      act.className = "ui-button shell-link-act";
+      act.innerHTML =
+        `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
+      act.title = "Remove local navigation link";
+      act.setAttribute("aria-label", "Remove local navigation link");
+      act.onclick = async () => {
+        await this._navigationMutation({action: "remove", link_uuid: item.uuid});
+      };
+      row.append(act);
+      return row;
+    }
+
+    if (!item.held) {
+      const connect = document.createElement("button");
+      connect.type = "button";
+      connect.className = "ui-button";
+      connect.textContent = "Connect";
+      connect.title = "This topic is not held on this client yet.";
+      connect.onclick = async () => {
+        await this._connectMutation({
+          action: "connect", topic_uuid: item.topic_uuid,
+        });
+      };
+      row.append(connect);
+    }
+    if (item.mine) {
+      const act = document.createElement("button");
+      act.type = "button";
+      act.className = "ui-button shell-link-act";
+      act.innerHTML =
+        `<svg viewBox="0 0 24 24" aria-hidden="true" class="icon-svg">${ICON_REMOVE}</svg>`;
+      act.title = "Stop offering; keep the item";
+      act.setAttribute("aria-label", act.title);
+      act.onclick = async () => {
+        await this._connectMutation({
+          action: "remove", relationship_uuid: item.uuid,
+        });
+      };
+      row.append(act);
+    }
     return row;
+  },
+
+  _openNewConnectedTopic(kind) {
+    this.openNewTopicDialog({
+      noun: kind.noun,
+      templates: (kind.templates || []).map(
+        (option) => [option.value, option.name],
+      ),
+      templateRequired: kind.template_required,
+      snapshotType: kind.application_id,
+      onCreate: async ({name, template, snapshot}) => {
+        await this._connectMutation({
+          action: "create", application_id: kind.application_id,
+          title: name, template, snapshot,
+        });
+      },
+    });
+  },
+
+  async _connectMutation(body) {
+    const topic = this._topic();
+    if (!topic) return;
+    try {
+      await this._post(
+        `/api/core/relationships/${encodeURIComponent(topic)}`, body,
+      );
+      this._navigationTopic = "";
+      await this.refreshNavigationLinks();
+      await this._changed();
+    } catch (error) {
+      showToast(error.message, true);
+    }
   },
 
   async _navigationMutation(body) {

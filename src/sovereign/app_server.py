@@ -48,6 +48,7 @@ from starlette.routing import Route
 
 from .application import ApplicationServices
 from .binding import GenericBindingService
+from .relationships import RelationshipService
 from .channel import ChannelManager
 from .collaboration import CollaborationService
 from .host import ApplicationHost
@@ -110,6 +111,7 @@ class AppRuntime:
     mailbox_channel: MailboxChannel
     host: ApplicationHost | None = None
     binding_service: GenericBindingService | None = None
+    relationship_service: RelationshipService | None = None
     logic: Any = None
     channel_wakeup: asyncio.Event | None = None
     channel_loop: asyncio.AbstractEventLoop | None = None
@@ -318,6 +320,10 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         runtime.config.get("generic_binding_capabilities") or [],
     )
     bindings = runtime.binding_service
+    runtime.relationship_service = RelationshipService(
+        runtime.session, runtime.collaboration,
+    )
+    relationships = runtime.relationship_service
 
     async def serve_ui(request: Request):
         return HTMLResponse(runtime.host.read_primary_asset("ui") if runtime.host else "")
@@ -447,6 +453,73 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
                 "candidates": runtime.session.navigation_candidates(topic_uuid),
                 "revision": runtime.current_revision(),
             })
+
+    async def api_core_relationships(request: Request):
+        topic_uuid = request.path_params["topic_uuid"]
+
+        def payload() -> dict:
+            candidates = relationships.relationship_candidates(topic_uuid)
+            return {
+                "status": "ok",
+                "relationships": relationships.relationships(topic_uuid),
+                "shared_candidates": candidates["shared"],
+                "own_candidates": candidates["own"],
+                "kinds": runtime.session.topic_kinds(),
+            }
+
+        if request.method == "GET":
+            with runtime.session.lock:
+                handler = runtime.session.shared_topic_handler_for(
+                    runtime.session.get_node(topic_uuid),
+                )
+                if handler is None or not str(handler.topic_noun or "").strip():
+                    return JSONResponse(
+                        {"status": "error", "reason": "topic is not held"},
+                        status_code=404,
+                    )
+                return JSONResponse(payload())
+        data = await request.json()
+        action = str(data.get("action") or "")
+        with runtime.session.lock:
+            if action == "add":
+                result = relationships.create_relationship(
+                    topic_uuid, str(data.get("topic_uuid") or ""),
+                )
+            elif action == "connect":
+                result = relationships.connect_relationship(
+                    topic_uuid, str(data.get("topic_uuid") or ""),
+                )
+            elif action == "create":
+                result = relationships.create_and_share_topic(
+                    topic_uuid,
+                    str(data.get("application_id") or ""),
+                    str(data.get("title") or ""),
+                    str(data.get("template") or ""),
+                    data.get("snapshot"),
+                )
+            elif action == "remove":
+                result = relationships.remove_relationship(
+                    topic_uuid, str(data.get("relationship_uuid") or ""),
+                )
+            else:
+                result = SessionResult(
+                    "error", reason="unknown relationship action",
+                )
+            if result.status == "ok":
+                runtime.session.advance_view_revision()
+        if result.status != "ok":
+            return JSONResponse(
+                {"status": "error", "reason": result.reason}, status_code=409,
+            )
+        if result.effects:
+            await asyncio.to_thread(runtime.deliver_effects, result.effects)
+        await asyncio.to_thread(
+            runtime.persist_confirmed_change, "relationships",
+        )
+        with runtime.session.lock:
+            response = payload()
+            response["revision"] = runtime.current_revision()
+            return JSONResponse(response)
 
     async def api_core_mutation_status(request: Request):
         mutation_id = request.path_params["mutation_id"]
@@ -717,6 +790,10 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         Route("/api/core/revision", api_core_revision),
         Route(
             "/api/core/navigation/{topic_uuid}", api_core_navigation,
+            methods=["GET", "POST"],
+        ),
+        Route(
+            "/api/core/relationships/{topic_uuid}", api_core_relationships,
             methods=["GET", "POST"],
         ),
         Route("/api/core/mutations/{mutation_id}", api_core_mutation_status),

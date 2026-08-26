@@ -2,6 +2,21 @@
 
 ## 0.1.9
 
+- **The header's "Connected" dialog now covers connected work, not only
+  local shortcuts.** A new Core-owned `sovereign_relationship` connects one
+  topic to another the way S-Team's Work section always did — per-actor
+  authored, live while any author's connection survives, and shared
+  wherever the source topic already publishes
+  (`bridge_topic_like`/`join_bridged_topic`) — but as one mechanism every
+  application gets for free, at `/api/core/relationships/{topic_uuid}`,
+  instead of three separately-built ones. The picker offers what's already
+  on this relay, what's this client's own to share, and a "New `<kind>`"
+  that creates and shares in one act. Applications with a domain rule Core
+  cannot know — S-Initiative's "at most one team" — register a
+  `validate_relationship` hook on their `ApplicationRegistration` instead of
+  Core special-casing their vocabulary. Local navigation links are
+  unchanged and sit in the same dialog for connections that are not work.
+
 - **Reaction buttons stay short while their explanations stay precise.**
   Every direct control reads `Adopt` or `Take back`; its tooltip and accessible
   name identify the actor, object, and fields involved. Menus retain the full
