@@ -12,7 +12,8 @@ from tests.test_channel_manager import _BridgingChannel
 
 
 def register(session: Session, application_id: str, root_type: str,
-             noun: str, topics: list, validate_relationship=None):
+             noun: str, topics: list, validate_relationship=None,
+             on_relationship_removed=None):
     session.register_application(ApplicationRegistration(
         application_id=application_id,
         root_types=frozenset({root_type}),
@@ -25,6 +26,7 @@ def register(session: Session, application_id: str, root_type: str,
             session, topics, root_type, title,
         ),
         validate_relationship=validate_relationship,
+        on_relationship_removed=on_relationship_removed,
     ))
 
 
@@ -118,6 +120,63 @@ class RelationshipMechanicsTests(unittest.TestCase):
 
         self.assertEqual(result.status, "error")
         self.assertIsNotNone(self.session.get_node(theirs.uuid))
+
+    def test_a_registered_hook_is_told_after_this_actors_own_removal(self):
+        removed_calls = []
+
+        def remember_removal(parent, topic_uuid):
+            removed_calls.append((parent.uuid, topic_uuid))
+
+        session = Session("rel-d")
+        teams: list = []
+        flows: list = []
+        register(
+            session, "teams", "team", "Team", teams,
+            on_relationship_removed=remember_removal,
+        )
+        register(session, "flows", "flow", "Flow", flows)
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        collaboration = CollaborationService(session, manager)
+        service = RelationshipService(session, collaboration)
+        team = session.get_node(make_topic(session, teams, "team", "Alpha").value)
+        flow = session.get_node(make_topic(session, flows, "flow", "Onboarding").value)
+        created = service.create_relationship(team.uuid, flow.uuid)
+
+        removed = service.remove_relationship(team.uuid, created.value.uuid)
+
+        self.assertEqual(removed.status, "ok")
+        self.assertEqual(removed_calls, [(team.uuid, flow.uuid)])
+
+    def test_the_hook_is_not_called_when_removal_is_refused(self):
+        calls = []
+        session = Session("rel-e")
+        teams: list = []
+        flows: list = []
+        register(
+            session, "teams", "team", "Team", teams,
+            on_relationship_removed=lambda parent, topic_uuid: calls.append(1),
+        )
+        register(session, "flows", "flow", "Flow", flows)
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        collaboration = CollaborationService(session, manager)
+        service = RelationshipService(session, collaboration)
+        team = session.get_node(make_topic(session, teams, "team", "Alpha").value)
+        theirs = session.create_child(team.uuid, {
+            "type": RELATIONSHIP_TYPE,
+            "topic_uuid": "elsewhere",
+            "application_id": "flows",
+            "title": "Not mine",
+            "actor_uuid": "peer-actor",
+        }, {}).value
+
+        refused = service.remove_relationship(team.uuid, theirs.uuid)
+
+        self.assertEqual(refused.status, "error")
+        self.assertEqual(calls, [])
 
     def test_an_unheld_target_falls_back_to_the_cached_title(self):
         node = self.session.create_child(self.team.uuid, {

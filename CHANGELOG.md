@@ -12,10 +12,12 @@
   instead of three separately-built ones. The picker offers what's already
   on this relay, what's this client's own to share, and a "New `<kind>`"
   that creates and shares in one act. Applications with a domain rule Core
-  cannot know — S-Initiative's "at most one team" — register a
-  `validate_relationship` hook on their `ApplicationRegistration` instead of
-  Core special-casing their vocabulary. Local navigation links are
-  unchanged and sit in the same dialog for connections that are not work.
+  cannot know — S-Initiative's "at most one team," S-Team remembering an
+  election was actively declined rather than never taken up — register a
+  `validate_relationship` or `on_relationship_removed` hook on their
+  `ApplicationRegistration` instead of Core special-casing their vocabulary.
+  Local navigation links are unchanged and sit in the same dialog for
+  connections that are not work.
 
 - **Reaction buttons stay short while their explanations stay precise.**
   Every direct control reads `Adopt` or `Take back`; its tooltip and accessible

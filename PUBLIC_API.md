@@ -175,7 +175,9 @@ per-actor authored, and shared wherever the source topic already publishes.
 - `relationships(parent_uuid)` is the union view: live while any actor's
   connection to that target survives.
 - `remove_relationship(parent_uuid, relationship_uuid)` removes only this
-  actor's own connection.
+  actor's own connection, then runs any registered `on_relationship_removed`
+  hook - Core has already deleted the record; the hook is for a local
+  consequence only the owning application knows about.
 - `relationship_candidates(parent_uuid)` splits into `shared` (already on
   this bridge) and `own` (this client's other items, of a registered kind,
   not yet shared here).

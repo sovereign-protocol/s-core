@@ -102,7 +102,7 @@ class RelationshipService:
         parent = self._topic(parent_uuid)
         if parent is None:
             return SessionResult("error", reason="relationship source is not held")
-        parent_node, _ = parent
+        parent_node, parent_handler = parent
         node = self.session.get_node(str(relationship_uuid or ""))
         actor = self.session.identity.uuid
         if (
@@ -114,7 +114,11 @@ class RelationshipService:
             return SessionResult(
                 "error", reason="you are not offering that connection",
             )
-        return self.session.delete(node.uuid)
+        target_uuid = str(node.data.get("topic_uuid") or "")
+        result = self.session.delete(node.uuid)
+        if result.status == "ok" and parent_handler.on_relationship_removed:
+            parent_handler.on_relationship_removed(parent_node, target_uuid)
+        return result
 
     def relationships(self, parent_uuid: str) -> list[dict]:
         """The union view: one row per target, live while anyone offers it."""

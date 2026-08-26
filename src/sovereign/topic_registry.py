@@ -42,6 +42,14 @@ class ApplicationRegistration:
                       result is the refusal reason. Absent means Core asks
                       nothing beyond its own mechanical checks - most
                       applications have no domain rule to enforce here.
+    `on_relationship_removed` optional (parent, topic_uuid) -> None, told
+                      after this actor's own connection from one of this
+                      application's topics is removed. Core has already
+                      deleted the record; this is only for a local
+                      consequence the application alone knows about - e.g.
+                      remembering that an offer was actively withdrawn
+                      rather than never made, so nothing re-adds it next
+                      sync.
     """
 
     application_id: str
@@ -56,6 +64,7 @@ class ApplicationRegistration:
     list_templates: Callable[[], Iterable[dict]] | None = None
     create_topic: Callable[[str, str, dict | None], Any] | None = None
     validate_relationship: Callable[[ProtocolNode, ProtocolNode], Any] | None = None
+    on_relationship_removed: Callable[[ProtocolNode, str], None] | None = None
 
 
 SharedTopicHandler = ApplicationRegistration
