@@ -291,6 +291,37 @@ class RelationshipBridgingTests(unittest.TestCase):
         self.assertEqual(refused.status, "error")
         self.assertEqual(refused.reason, "only one flow allowed")
 
+    def test_create_and_share_topic_is_validated_before_it_is_shared(self):
+        def refuse_everything(parent, target):
+            return SessionResult("error", reason="not allowed")
+
+        session = Session("rel-d")
+        teams: list = []
+        flows: list = []
+        register(
+            session, "teams", "team", "Team", teams,
+            validate_relationship=refuse_everything,
+        )
+        register(session, "flows", "flow", "Flow", flows)
+        manager = ChannelManager(session)
+        channel = _BridgingChannel()
+        manager.register(channel)
+        collaboration = CollaborationService(session, manager)
+        service = RelationshipService(session, collaboration)
+        team = session.get_node(make_topic(session, teams, "team", "Alpha").value)
+        channel.homes[team.uuid] = "relay-1"
+
+        refused = service.create_and_share_topic(team.uuid, "flows", "Onboarding")
+
+        self.assertEqual(refused.status, "error")
+        self.assertEqual(refused.reason, "not allowed")
+        # Neither left behind nor shared: a refused connection must not
+        # leave the topic it was refused for held, and must not publish it.
+        self.assertEqual(len(flows), 1)
+        self.assertIsNone(session.get_node(flows[0]))
+        self.assertEqual(service.relationships(team.uuid), [])
+        self.assertEqual(channel.attached, [])
+
 
 if __name__ == "__main__":
     unittest.main()

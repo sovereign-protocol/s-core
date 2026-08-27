@@ -195,14 +195,20 @@ class RelationshipService:
         if created.status != "ok":
             return created
         topic_uuid = str(created.value or "")
+        # Connected - and so validated - before anything is shared: an
+        # application's `validate_relationship` (e.g. S-Initiative's "at
+        # most one team") must have the last word before a peer ever sees
+        # this topic. A refusal deletes the local draft rather than leaving
+        # an orphan behind.
+        related = self.create_relationship(parent_node.uuid, topic_uuid)
+        if related.status != "ok":
+            self.session.delete(topic_uuid)
+            return related
         # Publishing is attempted, not required: a source with no channel of
         # its own has nowhere to put it yet, and the connection still stands
         # locally - the same "stays private until there is somewhere"
         # behavior S-Team's item creation already had.
         self.collaboration.bridge_topic_like(topic_uuid, parent_node.uuid)
-        related = self.create_relationship(parent_node.uuid, topic_uuid)
-        if related.status != "ok":
-            return related
         return SessionResult(
             "ok", value=topic_uuid,
             effects=[*created.effects, *related.effects],

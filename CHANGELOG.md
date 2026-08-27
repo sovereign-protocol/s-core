@@ -18,6 +18,12 @@
   `ApplicationRegistration` instead of Core special-casing their vocabulary.
   Local navigation links are unchanged and sit in the same dialog for
   connections that are not work.
+- **Fixed: a refused "New `<kind>`" connection no longer creates or shares
+  the topic it was refused for.** `create_and_share_topic` bridged the new
+  topic before `validate_relationship` had a say, so a refusal (S-Initiative's
+  "at most one team," say) still left a shared topic behind. Validation and
+  the connection itself now happen first; a refusal deletes the local draft
+  instead of leaving an orphan.
 
 - **Reaction buttons stay short while their explanations stay precise.**
   Every direct control reads `Adopt` or `Take back`; its tooltip and accessible
