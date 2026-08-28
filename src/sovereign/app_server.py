@@ -457,6 +457,13 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
     async def api_core_relationships(request: Request):
         topic_uuid = request.path_params["topic_uuid"]
 
+        # Never wrapped in `runtime.session.lock`: `relationship_candidates`
+        # reaches into the channel manager (`topics_share_a_bridge`), whose
+        # lock must be acquired before Session's, never after
+        # (locking.py: manager < relay I/O < Session). Every call below is
+        # individually locked where it needs to be - Session's own methods
+        # are `@_session_locked`, and the channel manager locks itself -  so
+        # nothing here needs an outer lock of its own.
         def payload() -> dict:
             candidates = relationships.relationship_candidates(topic_uuid)
             return {
@@ -468,45 +475,43 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
             }
 
         if request.method == "GET":
-            with runtime.session.lock:
-                handler = runtime.session.shared_topic_handler_for(
-                    runtime.session.get_node(topic_uuid),
+            handler = runtime.session.shared_topic_handler_for(
+                runtime.session.get_node(topic_uuid),
+            )
+            if handler is None or not str(handler.topic_noun or "").strip():
+                return JSONResponse(
+                    {"status": "error", "reason": "topic is not held"},
+                    status_code=404,
                 )
-                if handler is None or not str(handler.topic_noun or "").strip():
-                    return JSONResponse(
-                        {"status": "error", "reason": "topic is not held"},
-                        status_code=404,
-                    )
-                return JSONResponse(payload())
+            return JSONResponse(payload())
         data = await request.json()
         action = str(data.get("action") or "")
-        with runtime.session.lock:
-            if action == "add":
-                result = relationships.create_relationship(
-                    topic_uuid, str(data.get("topic_uuid") or ""),
-                )
-            elif action == "connect":
-                result = relationships.connect_relationship(
-                    topic_uuid, str(data.get("topic_uuid") or ""),
-                )
-            elif action == "create":
-                result = relationships.create_and_share_topic(
-                    topic_uuid,
-                    str(data.get("application_id") or ""),
-                    str(data.get("title") or ""),
-                    str(data.get("template") or ""),
-                    data.get("snapshot"),
-                )
-            elif action == "remove":
-                result = relationships.remove_relationship(
-                    topic_uuid, str(data.get("relationship_uuid") or ""),
-                )
-            else:
-                result = SessionResult(
-                    "error", reason="unknown relationship action",
-                )
-            if result.status == "ok":
-                runtime.session.advance_view_revision()
+        if action == "add":
+            result = relationships.create_relationship(
+                topic_uuid, str(data.get("topic_uuid") or ""),
+            )
+        elif action == "connect":
+            result = relationships.connect_relationship(
+                topic_uuid, str(data.get("topic_uuid") or ""),
+            )
+        elif action == "create":
+            result = relationships.create_and_share_topic(
+                topic_uuid,
+                str(data.get("application_id") or ""),
+                str(data.get("title") or ""),
+                str(data.get("template") or ""),
+                data.get("snapshot"),
+            )
+        elif action == "remove":
+            result = relationships.remove_relationship(
+                topic_uuid, str(data.get("relationship_uuid") or ""),
+            )
+        else:
+            result = SessionResult(
+                "error", reason="unknown relationship action",
+            )
+        if result.status == "ok":
+            runtime.session.advance_view_revision()
         if result.status != "ok":
             return JSONResponse(
                 {"status": "error", "reason": result.reason}, status_code=409,
@@ -516,10 +521,9 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         await asyncio.to_thread(
             runtime.persist_confirmed_change, "relationships",
         )
-        with runtime.session.lock:
-            response = payload()
-            response["revision"] = runtime.current_revision()
-            return JSONResponse(response)
+        response = payload()
+        response["revision"] = runtime.current_revision()
+        return JSONResponse(response)
 
     async def api_core_mutation_status(request: Request):
         mutation_id = request.path_params["mutation_id"]

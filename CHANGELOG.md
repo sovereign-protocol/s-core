@@ -24,6 +24,16 @@
   "at most one team," say) still left a shared topic behind. Validation and
   the connection itself now happen first; a refusal deletes the local draft
   instead of leaving an orphan.
+- **Fixed: opening "Connected" crashed the read behind it, once a topic
+  actually had a home on a real relay.** `api_core_relationships` wrapped
+  its whole route in `runtime.session.lock`, including the reach into the
+  channel manager that `relationship_candidates` makes
+  (`topics_share_a_bridge`) - a lock order this codebase has always
+  required the other way (`locking.py`: manager < relay I/O < Session). The
+  test doubles in `test_relationships.py` never touch the real channel
+  manager lock, so nothing caught it until a real relay did. The route no
+  longer holds an outer lock at all: every call inside is already locked
+  where it needs to be on its own.
 
 - **Reaction buttons stay short while their explanations stay precise.**
   Every direct control reads `Adopt` or `Take back`; its tooltip and accessible
