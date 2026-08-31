@@ -1,5 +1,280 @@
 # Changelog
 
+## Unreleased
+
+- **The header's "Connected" dialog now covers connected work, not only
+  local shortcuts.** A new Core-owned `sovereign_relationship` connects one
+  topic to another the way S-Team's Work section always did — per-actor
+  authored, live while any author's connection survives, and shared
+  wherever the source topic already publishes
+  (`bridge_topic_like`/`join_bridged_topic`) — but as one mechanism every
+  application gets for free, at `/api/core/relationships/{topic_uuid}`,
+  instead of three separately-built ones. The picker offers what's already
+  on this relay, what's this client's own to share, and a "New `<kind>`"
+  that creates and shares in one act. Applications with a domain rule Core
+  cannot know — S-Initiative's "at most one team," S-Team remembering an
+  election was actively declined rather than never taken up — register a
+  `validate_relationship` or `on_relationship_removed` hook on their
+  `ApplicationRegistration` instead of Core special-casing their vocabulary.
+  Local navigation links are unchanged and sit in the same dialog for
+  connections that are not work.
+- **Fixed: a refused "New `<kind>`" connection no longer creates or shares
+  the topic it was refused for.** `create_and_share_topic` bridged the new
+  topic before `validate_relationship` had a say, so a refusal (S-Initiative's
+  "at most one team," say) still left a shared topic behind. Validation and
+  the connection itself now happen first; a refusal deletes the local draft
+  instead of leaving an orphan.
+- **Fixed: opening "Connected" crashed the read behind it, once a topic
+  actually had a home on a real relay.** `api_core_relationships` wrapped
+  its whole route in `runtime.session.lock`, including the reach into the
+  channel manager that `relationship_candidates` makes
+  (`topics_share_a_bridge`) - a lock order this codebase has always
+  required the other way (`locking.py`: manager < relay I/O < Session). The
+  test doubles in `test_relationships.py` never touch the real channel
+  manager lock, so nothing caught it until a real relay did. The route no
+  longer holds an outer lock at all: every call inside is already locked
+  where it needs to be on its own.
+
+- **Reaction buttons stay short while their explanations stay precise.**
+  Every direct control reads `Adopt` or `Take back`; its tooltip and accessible
+  name identify the actor, object, and fields involved. Menus retain the full
+  action sentence on each choice.
+
+- **Shared selects and reorder handles now work across their whole face.** A
+  page-level `max-width` could cap the transparent native select before the
+  drawn chevron, and reorder items supplied through `getId` were not given the
+  identity the nested-list guard requires. The chevron now opens the select,
+  and both pointer and keyboard reordering reach application-owned lists.
+
+- **A reaction to several field edits names the fields.** The explicit tooltip
+  can now say `Take back my initiative name and intention changes` instead of
+  the ambiguous `Take back my initiative modification`.
+
+- **Held generic fields explain their policy with a quiet outline hand.** The
+  effective inherited adoption policy now travels with binding views, and the
+  shared decoration hides the hand whenever an actual transition is present.
+
+- **Links below a topic title are local navigation metadata.** They are no
+  longer protocol nodes, never publish or adopt, require both topics to be
+  held, grant no access, and do not prevent a topic being dropped. Core owns
+  their store, API, menu, and live route/title resolution.
+
+- **The shell's agenda count follows the Cockpit's renamed tile family.** The
+  optimistic update read `draft.boards`; that key is `draft.initiatives` now.
+  Nothing else in Core named it, and the comments that described a topic as "a
+  board" now say topic or initiative — Core does not own either noun.
+
+- **An object is drawn from its kind, and from nothing else.**
+  `ENTITY_GLYPHS` maps an entity kind to its paths; `entityBadge({kind})`
+  reads the drawing from there, `SovereignUI.entityGlyph(kind)` exposes the
+  same table to a surface that draws its own row, and `disclosure` takes a
+  `glyph` kind so a section carries the mark of what it holds. `entityBadge`
+  no longer takes an `icon`: S-Team was passing a key emoji for a
+  trusteeship, an open diamond for a role and a filled one for a membership —
+  three drawings chosen at three call sites, for objects Core already had
+  names for, all three under one kind. See `DESIGN_UI_CONSISTENCY.md` U8.
+
+- **A pairing is a property of the link, and a generation number is not guesswork.**
+  `pair_all_topics` moved from the consent map to the target record, which is
+  what it always described: only pairing sets it, nothing clears it, and it
+  says that this link carries a sibling. It is projected onto the connection
+  for its three readers and written nowhere else, and an edit to a target
+  carries it across - a corrected host does not unpair a link.
+
+  Giving a paired channel a target record to hold it needed `_refile_primary`:
+  a connection is keyed by storage fingerprint, primary is filed as
+  "unconfigured" while it has none, and nothing re-filed it when it adopted
+  one - so registering the descriptor would have missed primary and built a
+  second writer to the slot it had just taken.
+
+  And `publish_due_topics` now recovers `publication_seq` from the head it
+  published, when there was no state file to load. Starting again at zero left
+  every peer holding a higher number ignoring the acknowledgement for good.
+  Gated so an ordinary restart asks the relay nothing; a first start or a
+  deleted file pays one read per topic, once. The state file may now be
+  deleted at any time with no consequence beyond a republish and a refetch.
+
+- **A paired client records the pairing once it has one.**
+  `accept_pairing_token` wrote `relay_paired_client_id` before binding any
+  channel, so a token naming a relay the client could not open left the session
+  claiming a pairing that reached nothing. It is written after the channels
+  now. The ordering was justified by the state file being keyed by identity,
+  and by connections reading their identity from that metadata; neither holds -
+  the file is cache, and `_adopt_pairing_channel` sets `connection.identity`
+  outright. Every connection `RelayManager` builds now resolves its identity
+  the way `RelayLogic` does, honouring the paired client id instead of falling
+  through to this session's uuid, which is what made the second half true.
+
+- **Where a topic syncs and whether it syncs are both the session's now.**
+  `desired`, `shared`, `identity_topics` and `pair_all_topics` moved out of the
+  relay state file into the session's private relay metadata, keyed by target
+  id rather than by identity and storage location. The state file holds cache
+  only and may be deleted at any time; the worst it costs is a republish and a
+  refetch. Deleting one used to empty the consent it held, which unarmed
+  publishing and stopped inbound grafting with no error anywhere and a
+  perfectly healthy-looking connection.
+
+  Three things went with it, none of them ported: `update_target`'s
+  forty-five-line hand-carry of intent from the old connection to the new one,
+  which existed only because consent was keyed by location; the one-time
+  migration that read intent out of the state file to seed topic-to-target
+  assignments; and the legacy `configured` key stripped from older target
+  records. A connection reads the union of consent across every target it
+  serves, since two targets may name one relay, and writes to the one it was
+  built for. See `DESIGN_RELAY_CONSENT.md`.
+
+- **A relay state file belongs to a connection, and does not outlive it.**
+  `relay_state_directory` now places the file for every connection an instance
+  makes, the implicit one built from the flat config included; it reached
+  connections built from a target only, so an instance that set it went on
+  writing into the shared `data/` beside its working directory anyway. A
+  retired connection now deletes its state file rather than persisting an
+  emptied copy of it, and a connection that re-keys to an adopted location
+  deletes the file its boot-time path left behind - the reload after a re-key
+  already discarded that file's contents, so keeping it only ever left
+  residue. Found live: a `data/` holding 48 relay state files, 46 of them
+  all-empty and none attributable to anything still configured - one per
+  connection ever retired, per location ever abandoned.
+
+- **An application says how its own topics are made, once.**
+  `ApplicationRegistration` takes `topic_noun`, `template_required`,
+  `list_templates` and `create_topic(title, template, snapshot)`; Core answers
+  `Session.topic_kinds()` and `Session.create_application_topic(...)` from
+  them. All three ways of starting are one call — from nothing, from a
+  template the owning application listed, or from a snapshot document it
+  exported — and Core reads neither the template id nor the document.
+
+  This replaced a table in each of three applications: the Cockpit, S-Team and
+  S-Initiative each carried a noun, a facade api version, a per-kind template
+  lookup and a create path per kind, all restating what the owning application
+  already knew. They had drifted, too — one could start a team from a file and
+  another could not. An application that registers none of the four simply
+  cannot have its topics made from elsewhere, which is the right answer for
+  one that owns none.
+
+- **The bar says what you are looking at and where else you can go.**
+  `setTopicSelector` becomes `setTopicName` — a name, edited in place, with
+  no list of the application's other topics beside it: reaching another topic
+  goes through the Cockpit, which is the principle the shell already stated
+  and the switcher predated. `setTopicLinks({links, make, link, onFollow,
+  onRemove})` supplies what this topic references.
+  `topicHref(applicationId, topicUuid)` composes any application's topic URL
+  from `application_summaries()`, so no application knows another's route —
+  every application now opens a topic through `?topic=<uuid>`.
+
+  The bar is five objects on three regions — collaboration, navigation,
+  connections. `[Agenda · N]` and `[Changes · N]` on the left, each counting
+  only what it is named for. The topic centred in the middle under its
+  application's mark, with a row of destinations beneath it: the topics this
+  one names, then everything you hold. Who is here on the right. It had grown
+  thirteen visual treatments across four border languages, three corner radii
+  and five type sizes, with a grid that could not centre anything; the shape
+  vocabulary is now two shapes, two type sizes, and no border at rest.
+  `setAppActions` is gone with it — the bar holds nothing of an
+  application's. See `DESIGN_UI_CONSISTENCY.md` U7.
+
+- **One word per concept, decided before the pixels moved.** "Topic" was
+  Core's protocol noun, an agenda field's placeholder and a word nobody
+  applies to their own team; "Aligned" collided head-on with S-Team's
+  Agreement, which is a document people accept; one sync state carried four
+  surface words and people carried three. The user-facing vocabulary is now
+  fixed — changes, needs your review, conflict, waiting on others, adopt,
+  people — while every internal name is untouched, because they are precise
+  and nobody reads them. There is deliberately no collective noun: where the
+  shell must name an initiative, an organization and a flow at once it
+  composes from `topic_noun` or avoids the noun. See `DESIGN_VOCABULARY.md`.
+
+- **Icons have three classes and three construction rules.** An application
+  mark depicts what the application holds and is built from whole shapes that
+  survive 18px; an object glyph carries one idea in four strokes; an act uses
+  the conventional drawing and is never invented. The three destructions stay
+  visually apart, because conflating them once cost a list removal that
+  called `delete_process` and destroyed the thing everywhere: a minus in a
+  circle is off my side and reversible, a trash can is gone for everyone, and
+  `×` is reserved for close so it can never be read as either. See
+  `DESIGN_UI_CONSISTENCY.md` U8.
+
+- **Third-party icon attribution.** `NOTICE` gains an MIT section for the
+  Feather-derived paths and the Tabler-derived geometry, with `LICENSES/MIT.txt`
+  beside it. It says which marks are original and is given as a precaution
+  where a shape is merely the obvious drawing of its object.
+
+- **A reference is removed by whoever wrote it.** `remove_topic_link` refuses
+  a link this client did not author. A link is adopted same-origin, so a
+  deletion written over somebody else's reference is one their peers refuse:
+  locally gone, remotely standing, and back on the next sync. Saying so once
+  beats leaving it to be discovered.
+
+- **One dialog makes a topic, wherever it is made.**
+  `SovereignShell.openNewTopicDialog({noun, templates, templateRequired,
+  blankLabel, snapshotType, onCreate})` asks the three questions that making a
+  topic always asks — what it is called, what it starts from, or a snapshot
+  file instead of both — and hands the answers back. Core owns the shape, the
+  wording built from the noun, and reading and refusing a snapshot file; the
+  application owns what a template is and what creating actually calls. There
+  were four copies of this form, three in the Cockpit and one in S-Team, and
+  the S-Team one was the only place a snapshot could not be loaded — nobody
+  decided that, it is what a copy costs. See `DESIGN_UI_CONSISTENCY.md` U5.
+
+- **Topic links, and the three acts that are not the same act.** A `topic_link`
+  node records that one node references a topic; applications own where links
+  live, Core owns what one is and what following it does. Nothing keeps a table
+  of them, because the links are the record: `links_to(topic_uuid)` walks this
+  client's own tree. `remove_topic_link` deletes one reference and leaves the
+  topic and every other reference to it, including other people's.
+  `drop_topic` stops this client holding a topic — it ends sharing and removes
+  the local subtree *without writing a tombstone*, so nothing is published and
+  a peer sees only that this client stopped publishing; it refuses while any
+  link here still points at the topic, and that count is a closed question
+  about one tree rather than a claim about the network. `Session.delete` is
+  neither of those and stays with the application that owns the topic, the only
+  one that knows who may destroy it. `follow_topic_link` treats a link to a
+  topic this client does not hold as an invitation rather than a broken
+  reference, mounting it where a peer's perspective carries it and saying
+  nobody is publishing it where none does — so a link names a topic and is
+  never a key to it. See `DESIGN_TOPIC_LINKS.md` and `PUBLIC_API.md`.
+
+  A duplicate is judged **per author**, not per parent: two actors referencing
+  one topic from one parent is not a duplicate but the mechanism by which a
+  team's list of what it runs is the union of its members' own references, and
+  by which removing yours leaves everybody else's standing. `topic_links` and
+  `links_to` take `authored_here` to tell the two apart, and `topic_links`
+  takes a parent. An application wanting one reference whoever wrote it says
+  so itself.
+
+- **One palette for transition state, defined once.** A stage now has a colour
+  token in `shared.css` — conflict, awaiting me, in transition — in two tones,
+  because coloured text on a dark header and a filled dot cannot be the same
+  hex and still read as the same colour. `@keyframes stage-pulse` moved here
+  too: it was defined in one application's stylesheet, so the one surface that
+  happened to own it was the only one that could use it.
+- **The topic header reports every band, not only the worst.** One thing to
+  review and one still travelling are two facts about two nodes, and an
+  if/else chain showed the first and hid the second. Aligned now says nothing
+  at all — the button's tooltip still says so on hover.
+- Added `Session.ensure_container(parent_uuid, name, node_type)`: a named
+  child an application uses to name a *place* rather than a type. It hands
+  Core the container's uuid, so ordering, adoption declarations and hash
+  scopes address somewhere in the tree instead of a string inside `data`.
+  A new container takes a uuid derived from its parent's, which is what lets
+  two clients arrive at the same one without either adopting it from the
+  other: the data is identical and neither timestamps nor uuids enter the
+  content hash, so the copies reconcile as agreement rather than as a change.
+  A peer's child then finds its parent already present, which a container
+  invented independently on each side would not.
+- `Protocol.create_child` accepts a caller-supplied `node_uuid`. Neither hash
+  covers the uuid, so it is assigned before the node is indexed and the
+  signature is applied afterwards as usual. A uuid already in use is refused.
+- Agenda items now hang off a container of their own rather than the topic
+  root, and `project_nodes(topic_uuid, parent_uuid)` takes the container in
+  place of a node type. The container carries the same derived uuid in every
+  perspective, so a projection addresses a peer's agenda by *where it is*
+  instead of matching a type string against everything in their tree. Core
+  declares the container never-adoptable itself, which retires the rule every
+  application previously had to remember to declare for `agenda_item`.
+- `_ordered_children` and `next_child_order` take `node_type` as optional.
+  A container holds one kind, so its uuid says what the type used to.
+
 ## 0.1.9
 
 - Added `Session.reconsider_adoption(topic_uuid)`: an application says its own

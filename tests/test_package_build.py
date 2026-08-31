@@ -22,6 +22,8 @@ assert files('sovereign.assets').joinpath('shared-api.js').is_file()
 assert files('sovereign.assets').joinpath('shared-session.js').is_file()
 assert files('sovereign.assets').joinpath('shared.css').is_file()
 assert files('sovereign.assets').joinpath('manual.html').is_file()
+assert files('sovereign.assets').joinpath('sovereign-client.js').is_file()
+assert files('sovereign.assets').joinpath('binding-example.html').is_file()
 assert sovereign.__all__
 """
 

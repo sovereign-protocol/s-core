@@ -47,6 +47,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .application import ApplicationServices
+from .binding import GenericBindingService
+from .relationships import RelationshipService
 from .channel import ChannelManager
 from .collaboration import CollaborationService
 from .host import ApplicationHost
@@ -57,7 +59,7 @@ from .blob_store import (
     BlobStore, SAFE_IMAGE_MIMES, blob_hex, canonical_attachments,
     is_valid_image, referenced_blob_ids,
 )
-from .session import Session, SessionEffect
+from .session import Session, SessionEffect, SessionResult
 from .trace_log import TraceLogger
 from .relay_logic import RelayManager
 from .persistence import (
@@ -82,6 +84,7 @@ DEFAULT_CONFIG = {
     "bind_host": "127.0.0.1",
     "applications": None,
     "primary_application_id": None,
+    "generic_binding_capabilities": [],
 }
 CORE_APPLICATION_ALIASES = {
     "manual": {
@@ -107,6 +110,8 @@ class AppRuntime:
     collaboration: CollaborationService
     mailbox_channel: MailboxChannel
     host: ApplicationHost | None = None
+    binding_service: GenericBindingService | None = None
+    relationship_service: RelationshipService | None = None
     logic: Any = None
     channel_wakeup: asyncio.Event | None = None
     channel_loop: asyncio.AbstractEventLoop | None = None
@@ -310,6 +315,16 @@ def create_runtime(port: int, config: dict) -> AppRuntime:
 
 
 def build_core_routes(runtime: AppRuntime) -> list[Route]:
+    runtime.binding_service = GenericBindingService(
+        runtime.session,
+        runtime.config.get("generic_binding_capabilities") or [],
+    )
+    bindings = runtime.binding_service
+    runtime.relationship_service = RelationshipService(
+        runtime.session, runtime.collaboration,
+    )
+    relationships = runtime.relationship_service
+
     async def serve_ui(request: Request):
         return HTMLResponse(runtime.host.read_primary_asset("ui") if runtime.host else "")
 
@@ -339,6 +354,21 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
                 encoding="utf-8",
             ),
             media_type="application/javascript",
+        )
+
+    async def serve_sovereign_client_js(request: Request):
+        return Response(
+            files("sovereign.assets").joinpath("sovereign-client.js").read_text(
+                encoding="utf-8",
+            ),
+            media_type="application/javascript",
+        )
+
+    async def serve_binding_example(request: Request):
+        return HTMLResponse(
+            files("sovereign.assets").joinpath("binding-example.html").read_text(
+                encoding="utf-8",
+            )
         )
 
     async def api_protocol(request: Request):
@@ -374,6 +404,126 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
 
     async def api_core_revision(request: Request):
         return JSONResponse({"revision": runtime.current_revision()})
+
+    async def api_core_navigation(request: Request):
+        topic_uuid = request.path_params["topic_uuid"]
+        if request.method == "GET":
+            with runtime.session.lock:
+                handler = runtime.session.shared_topic_handler_for(
+                    runtime.session.get_node(topic_uuid),
+                )
+                if handler is None or not str(handler.topic_noun or "").strip():
+                    return JSONResponse(
+                        {"status": "error", "reason": "topic is not held"},
+                        status_code=404,
+                    )
+                return JSONResponse({
+                    "status": "ok",
+                    "links": runtime.session.navigation_links(topic_uuid),
+                    "candidates": runtime.session.navigation_candidates(topic_uuid),
+                })
+        data = await request.json()
+        action = str(data.get("action") or "")
+        with runtime.session.lock:
+            if action == "add":
+                result = runtime.session.create_navigation_link(
+                    topic_uuid, str(data.get("topic_uuid") or ""),
+                )
+            elif action == "remove":
+                result = runtime.session.remove_navigation_link(
+                    topic_uuid, str(data.get("link_uuid") or ""),
+                )
+            else:
+                result = SessionResult(
+                    "error", reason="unknown navigation action",
+                )
+            if result.status == "ok":
+                runtime.session.advance_view_revision()
+        if result.status != "ok":
+            return JSONResponse(
+                {"status": "error", "reason": result.reason}, status_code=409,
+            )
+        await asyncio.to_thread(
+            runtime.persist_confirmed_change, "navigation",
+        )
+        with runtime.session.lock:
+            return JSONResponse({
+                "status": "ok",
+                "links": runtime.session.navigation_links(topic_uuid),
+                "candidates": runtime.session.navigation_candidates(topic_uuid),
+                "revision": runtime.current_revision(),
+            })
+
+    async def api_core_relationships(request: Request):
+        topic_uuid = request.path_params["topic_uuid"]
+
+        # Never wrapped in `runtime.session.lock`: `relationship_candidates`
+        # reaches into the channel manager (`topics_share_a_bridge`), whose
+        # lock must be acquired before Session's, never after
+        # (locking.py: manager < relay I/O < Session). Every call below is
+        # individually locked where it needs to be - Session's own methods
+        # are `@_session_locked`, and the channel manager locks itself -  so
+        # nothing here needs an outer lock of its own.
+        def payload() -> dict:
+            candidates = relationships.relationship_candidates(topic_uuid)
+            return {
+                "status": "ok",
+                "relationships": relationships.relationships(topic_uuid),
+                "shared_candidates": candidates["shared"],
+                "own_candidates": candidates["own"],
+                "kinds": runtime.session.topic_kinds(),
+            }
+
+        if request.method == "GET":
+            handler = runtime.session.shared_topic_handler_for(
+                runtime.session.get_node(topic_uuid),
+            )
+            if handler is None or not str(handler.topic_noun or "").strip():
+                return JSONResponse(
+                    {"status": "error", "reason": "topic is not held"},
+                    status_code=404,
+                )
+            return JSONResponse(payload())
+        data = await request.json()
+        action = str(data.get("action") or "")
+        if action == "add":
+            result = relationships.create_relationship(
+                topic_uuid, str(data.get("topic_uuid") or ""),
+            )
+        elif action == "connect":
+            result = relationships.connect_relationship(
+                topic_uuid, str(data.get("topic_uuid") or ""),
+            )
+        elif action == "create":
+            result = relationships.create_and_share_topic(
+                topic_uuid,
+                str(data.get("application_id") or ""),
+                str(data.get("title") or ""),
+                str(data.get("template") or ""),
+                data.get("snapshot"),
+            )
+        elif action == "remove":
+            result = relationships.remove_relationship(
+                topic_uuid, str(data.get("relationship_uuid") or ""),
+            )
+        else:
+            result = SessionResult(
+                "error", reason="unknown relationship action",
+            )
+        if result.status == "ok":
+            runtime.session.advance_view_revision()
+        if result.status != "ok":
+            return JSONResponse(
+                {"status": "error", "reason": result.reason}, status_code=409,
+            )
+        if result.effects:
+            await asyncio.to_thread(runtime.deliver_effects, result.effects)
+        await asyncio.to_thread(
+            runtime.persist_confirmed_change, "relationships",
+        )
+        response = payload()
+        response["revision"] = runtime.current_revision()
+        return JSONResponse(response)
 
     async def api_core_mutation_status(request: Request):
         mutation_id = request.path_params["mutation_id"]
@@ -533,6 +683,102 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         removed = await asyncio.to_thread(runtime.collect_local_blobs)
         return JSONResponse({"status": "ok", "removed": removed})
 
+    def binding_origin(request: Request) -> str:
+        return str(request.headers.get("origin") or request.base_url).rstrip("/")
+
+    def binding_headers(origin: str) -> dict[str, str]:
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, X-Sovereign-Capability",
+            "Vary": "Origin",
+        }
+
+    def binding_token(request: Request) -> str:
+        return str(request.headers.get("x-sovereign-capability") or "")
+
+    async def binding_mutation(operation, origin: str) -> JSONResponse:
+        with runtime.session.lock:
+            result = operation()
+            if result.status == "ok":
+                runtime.session.advance_view_revision()
+            revision = runtime.current_revision()
+        if result.status == "ok":
+            await asyncio.to_thread(
+                runtime.persist_confirmed_change, "generic-binding",
+            )
+            if result.effects:
+                await asyncio.to_thread(runtime.deliver_effects, result.effects)
+        payload = {
+            "status": result.status,
+            "reason": result.reason or "",
+            "revision": revision,
+        }
+        return JSONResponse(
+            payload,
+            status_code=200 if result.status == "ok" else 409,
+            headers=binding_headers(origin),
+        )
+
+    async def api_core_binding(request: Request):
+        origin = binding_origin(request)
+        if request.method == "OPTIONS":
+            if not bindings.origin_is_known(origin):
+                return JSONResponse(
+                    {"status": "error", "reason": "origin is not authorized"},
+                    status_code=403,
+                )
+            return Response(status_code=204, headers=binding_headers(origin))
+
+        node_uuid = request.path_params["node_uuid"]
+        data = await request.json() if request.method == "POST" else request.query_params
+        topic_uuid = str(data.get("topic_uuid") or "")
+        operation = str(data.get("operation") or (
+            "read" if request.method == "GET" else ""
+        ))
+        field = str(data.get("field") or "")
+        capability = bindings.capability_for(
+            binding_token(request), origin, topic_uuid, node_uuid,
+            operation, field if operation in {"read", "write"} else None,
+        )
+        if capability is None:
+            headers = binding_headers(origin) if bindings.origin_is_known(origin) else {}
+            return JSONResponse(
+                {"status": "error", "reason": "binding capability refused"},
+                status_code=403,
+                headers=headers,
+            )
+        if operation == "read" and request.method == "GET":
+            await drain_peer_update_hook(runtime)
+            view = bindings.view(topic_uuid, node_uuid, field)
+            return JSONResponse(
+                view,
+                status_code=200 if view.get("status") == "ok" else 409,
+                headers=binding_headers(origin),
+            )
+        if operation == "write" and request.method == "POST":
+            return await binding_mutation(
+                lambda: bindings.write(
+                    topic_uuid, node_uuid, field, data.get("value"),
+                    data.get("expected_content_hash"),
+                ),
+                origin,
+            )
+        if operation == "react" and request.method == "POST":
+            return await binding_mutation(
+                lambda: bindings.react(
+                    topic_uuid, node_uuid, str(data.get("source_addr") or ""),
+                    str(data.get("reaction") or ""), bool(data.get("absent")),
+                    capability.fields,
+                ),
+                origin,
+            )
+        return JSONResponse(
+            {"status": "error", "reason": "operation and method do not match"},
+            status_code=400,
+            headers=binding_headers(origin),
+        )
+
     return [
         Route("/", serve_ui),
         Route("/styles.css", serve_css),
@@ -540,10 +786,20 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         Route("/shared-api.js", serve_shared_api_js),
         Route("/shared-session.js", serve_shared_session_js),
         Route("/shared.js", serve_shared_js),
+        Route("/sovereign-client.js", serve_sovereign_client_js),
+        Route("/binding-example", serve_binding_example),
         Route("/api/protocol", api_protocol),
         Route("/api/network", api_network),
         Route("/api/core/applications", api_core_applications),
         Route("/api/core/revision", api_core_revision),
+        Route(
+            "/api/core/navigation/{topic_uuid}", api_core_navigation,
+            methods=["GET", "POST"],
+        ),
+        Route(
+            "/api/core/relationships/{topic_uuid}", api_core_relationships,
+            methods=["GET", "POST"],
+        ),
         Route("/api/core/mutations/{mutation_id}", api_core_mutation_status),
         Route("/api/core/profile", api_core_profile, methods=["GET", "POST"]),
         Route(
@@ -554,18 +810,34 @@ def build_core_routes(runtime: AppRuntime) -> list[Route]:
         Route("/api/blob", api_blob_upload, methods=["POST"]),
         Route("/api/blob/gc", api_blob_gc, methods=["POST"]),
         Route("/api/blob/{blob_id}", api_blob_get),
+        Route(
+            "/api/core/bindings/{node_uuid}", api_core_binding,
+            methods=["GET", "POST", "OPTIONS"],
+        ),
     ]
 
 
 async def run_peer_update_hook(runtime: AppRuntime) -> bool:
     host = runtime.host
-    if not host:
-        return False
-    outcome = await asyncio.to_thread(host.notify_peer_update)
-    if outcome.effects:
+    outcome = (
+        await asyncio.to_thread(host.notify_peer_update)
+        if host else None
+    )
+    binding_service = getattr(runtime, "binding_service", None)
+    binding_changed = (
+        await asyncio.to_thread(binding_service.reconcile_adoption)
+        if binding_service else False
+    )
+    changed = bool((outcome and outcome.changed) or binding_changed)
+    if outcome and outcome.effects:
         await asyncio.to_thread(runtime.deliver_effects, outcome.effects)
+    if changed or (outcome and outcome.effects):
         runtime.session.advance_view_revision()
-    return outcome.changed
+    if changed:
+        await asyncio.to_thread(
+            runtime.persist_confirmed_change, "peer-reconciliation",
+        )
+    return changed
 
 
 async def drain_peer_update_hook(runtime: AppRuntime, passes: int = 4) -> None:
@@ -687,16 +959,17 @@ async def channel_poll_tick(runtime: AppRuntime, due_only: bool = False) -> bool
         # visible revision observable together. Asserting it is cheaper than
         # a second lock, and states the contract a caller has to honour.
         runtime.session.lock.assert_owned()
-        host = runtime.host
-        if not host:
-            runtime.session.advance_view_revision()
-            view_confirmed.set()
-            return
         for _ in range(4):
-            outcome = host.notify_peer_update()
-            for effect in outcome.effects:
-                deferred_effects.setdefault(effect_key(effect), effect)
-            if not outcome.changed:
+            outcome = runtime.host.notify_peer_update() if runtime.host else None
+            if outcome:
+                for effect in outcome.effects:
+                    deferred_effects.setdefault(effect_key(effect), effect)
+            binding_service = getattr(runtime, "binding_service", None)
+            binding_changed = (
+                binding_service.reconcile_adoption()
+                if binding_service else False
+            )
+            if not ((outcome and outcome.changed) or binding_changed):
                 break
         runtime.session.advance_view_revision()
         view_confirmed.set()

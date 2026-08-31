@@ -48,7 +48,7 @@ class ProtocolExplorerControllerTests(unittest.TestCase):
         paths = {route.path for route in routes}
         self.assertIn("/api/protocol-explorer/state", paths)
         self.assertIn("/api/protocol-explorer/create_child", paths)
-        self.assertIn("/api/protocol-explorer/accept_peer_node", paths)
+        self.assertIn("/api/protocol-explorer/adopt_peer_node", paths)
 
     def test_modify_route_rejects_invalid_weight_as_json_error(self):
         session = Session("http://a")

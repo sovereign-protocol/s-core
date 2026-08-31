@@ -60,9 +60,9 @@ def build_routes(logic, runtime) -> list[Route]:
             data["source_uuid"], data["destination_uuid"],
         ))
 
-    async def api_accept_peer_node(request: Request):
+    async def api_adopt_peer_node(request: Request):
         data = await request.json()
-        return await _json_result(runtime, logic.accept_peer_node(
+        return await _json_result(runtime, logic.adopt_peer_node(
             data["source_addr"],
             data["node_uuid"],
             bool(data.get("adopt_absence")),
@@ -78,7 +78,7 @@ def build_routes(logic, runtime) -> list[Route]:
         Route("/api/protocol-explorer/delete", api_delete, methods=["POST"]),
         Route("/api/protocol-explorer/copy", api_copy, methods=["POST"]),
         Route("/api/protocol-explorer/move", api_move, methods=["POST"]),
-        Route("/api/protocol-explorer/accept_peer_node", api_accept_peer_node,
+        Route("/api/protocol-explorer/adopt_peer_node", api_adopt_peer_node,
               methods=["POST"]),
     ]
 

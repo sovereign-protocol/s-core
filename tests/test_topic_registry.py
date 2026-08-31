@@ -1,7 +1,9 @@
 import unittest
 
 from sovereign.protocol import ProtocolNode
-from sovereign.topic_registry import SharedTopicRegistry
+from sovereign.topic_registry import (
+    ApplicationRegistration, SharedTopicRegistry,
+)
 
 
 class SharedTopicRegistryTests(unittest.TestCase):
@@ -61,6 +63,47 @@ class SharedTopicRegistryTests(unittest.TestCase):
         )
         self.assertFalse(registry.invitation_requires_mount(profile))
         self.assertTrue(registry.invitation_requires_mount(board))
+
+    def test_only_an_application_that_said_how_offers_a_kind_to_make(self):
+        """Making one is the owning application's, and it says so once.
+
+        Three applications had each grown a table of how to create another
+        application's topics - a noun, an api version, a template lookup and
+        a create call per kind - and every one of them was restating what
+        the owning application already knew.
+        """
+        registry = SharedTopicRegistry()
+        made = []
+        registry.register_application(ApplicationRegistration(
+            "flow", frozenset({"process"}), lambda: [], lambda tree: None,
+            True, True,
+            topic_noun="Flow",
+            template_required=True,
+            list_templates=lambda: [{"value": "election", "name": "Election"}],
+            create_topic=lambda title, template, snapshot: made.append(
+                (title, template, snapshot),
+            ),
+        ))
+        # Registered, and read from, but nothing here can be made.
+        registry.register_application(ApplicationRegistration(
+            "reader", frozenset({"note"}), lambda: [], lambda tree: None,
+            True, True,
+        ))
+
+        kinds = registry.topic_kinds()
+
+        self.assertEqual([kind["application_id"] for kind in kinds], ["flow"])
+        self.assertTrue(kinds[0]["template_required"])
+        self.assertEqual(
+            kinds[0]["templates"],
+            [{"value": "election", "name": "Election", "description": ""}],
+        )
+        registry.make_topic("flow", "Choosing", "election")
+        self.assertEqual(made, [("Choosing", "election", None)])
+        # An application that is not here answers nothing rather than
+        # raising, so the caller can say so in its own words.
+        self.assertIsNone(registry.make_topic("absent", "Anything"))
+        self.assertIsNone(registry.make_topic("reader", "Anything"))
 
 
 if __name__ == "__main__":

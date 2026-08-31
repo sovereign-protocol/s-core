@@ -16,6 +16,42 @@ from .protocol import ProtocolNode
 
 @dataclass(frozen=True)
 class ApplicationRegistration:
+    """What an application says about the topics it owns.
+
+    The last three fields are how one of its topics is *made*. They are
+    optional, and an application that leaves them out simply cannot have one
+    made from anywhere else - which is the honest answer for an aggregate
+    that owns no topics of its own.
+
+    They are here because three applications had each grown a table of how
+    to create another application's topics, differing in what they could
+    make and in what they let you start from. Every one of those tables was
+    restating what the owning application already knew.
+
+    `topic_noun`      what one of these is called to a person: "Initiative"
+    `template_required` a process with no workflow is not a process
+    `list_templates`  what a new one can start from, as {value, name} and an
+                      optional `description`
+    `create_topic`    (title, template, snapshot) -> SessionResult naming the
+                      new topic. All three ways of starting are its own: from
+                      nothing, from a template it listed, or from a snapshot
+                      document it exported.
+    `validate_relationship` optional (parent, target) -> SessionResult | None,
+                      asked before Core connects two of this application's
+                      topics. `None`, or an "ok" result, allows it; any other
+                      result is the refusal reason. Absent means Core asks
+                      nothing beyond its own mechanical checks - most
+                      applications have no domain rule to enforce here.
+    `on_relationship_removed` optional (parent, topic_uuid) -> None, told
+                      after this actor's own connection from one of this
+                      application's topics is removed. Core has already
+                      deleted the record; this is only for a local
+                      consequence the application alone knows about - e.g.
+                      remembering that an offer was actively withdrawn
+                      rather than never made, so nothing re-adds it next
+                      sync.
+    """
+
     application_id: str
     root_types: frozenset[str]
     list_topics: Callable[[], Iterable[str | ProtocolNode]]
@@ -23,6 +59,12 @@ class ApplicationRegistration:
     assignment_scoped: bool
     mount_invitation: bool
     on_peer_update: Callable[[], Any] | None = None
+    topic_noun: str = ""
+    template_required: bool = False
+    list_templates: Callable[[], Iterable[dict]] | None = None
+    create_topic: Callable[[str, str, dict | None], Any] | None = None
+    validate_relationship: Callable[[ProtocolNode, ProtocolNode], Any] | None = None
+    on_relationship_removed: Callable[[ProtocolNode, str], None] | None = None
 
 
 SharedTopicHandler = ApplicationRegistration
@@ -142,6 +184,50 @@ class SharedTopicRegistry:
         """Whether a recognized topic is expected to exist in the local tree."""
         handler = self.handler_for(tree)
         return handler.mount_invitation if handler else True
+
+    def topic_kinds(self) -> list[dict]:
+        """What can be made here, and what each one starts from.
+
+        Only applications actually running on this client, and only those
+        that said how one of their topics is made. A kind that is not here
+        is not offered rather than offered and then refused.
+        """
+        out = []
+        for handler in self.registrations():
+            if handler.create_topic is None or not handler.topic_noun:
+                continue
+            templates = handler.list_templates
+            out.append({
+                "application_id": handler.application_id,
+                "noun": handler.topic_noun,
+                "template_required": handler.template_required,
+                "templates": [
+                    {
+                        "value": str(item.get("value") or ""),
+                        "name": str(item.get("name") or item.get("value") or ""),
+                        "description": str(item.get("description") or ""),
+                    }
+                    for item in (templates() if templates else [])
+                ],
+            })
+        return sorted(out, key=lambda kind: kind["noun"].lower())
+
+    def make_topic(
+        self, application_id: str, title: str, template: str = "",
+        snapshot: dict | None = None,
+    ):
+        """Ask the application that owns a kind to make one.
+
+        Returns its own result. Nothing here reads a template id or a
+        snapshot document: what a valid one contains is the owning
+        application's answer, and the caller's business is only the uuid
+        that comes back.
+        """
+        with self._lock:
+            handler = self._handlers_by_owner.get(str(application_id or "").strip())
+        if handler is None or handler.create_topic is None:
+            return None
+        return handler.create_topic(str(title or ""), str(template or ""), snapshot)
 
     def has_assignment_scoped_handlers(self) -> bool:
         with self._lock:

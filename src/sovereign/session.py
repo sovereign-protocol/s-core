@@ -53,6 +53,8 @@ _LOCAL_REVISION_ORIGIN = object()
 # perspective is not projected. Callers wanting every verified record
 # regardless of age pass max_age_seconds=None explicitly.
 DEFAULT_AGENDA_PERSPECTIVE_MAX_AGE_SECONDS = 2 * 60 * 60
+GENERIC_BINDING_TOPIC_TYPE = "sovereign_binding_topic"
+GENERIC_BINDING_NODE_TYPE = "sovereign_binding"
 
 _CORE_PROFILE_FIELDS = frozenset({
     "type", "name", "profile_schema_version", "identity_key",
@@ -283,6 +285,12 @@ class Session:
             lambda: [self.identity],
             self.accept_profile_invitation,
             mount_invitation=False,
+        )
+        self.shared_topics.register(
+            "Sovereign Core bindings",
+            {GENERIC_BINDING_TOPIC_TYPE},
+            self.generic_binding_topics,
+            self.accept_generic_binding_invitation,
         )
 
     @_session_locked
@@ -630,10 +638,7 @@ class Session:
 
     def _folder(self, parent: ProtocolNode, name: str,
                node_type: str = "folder") -> ProtocolNode:
-        for child in parent.children:
-            if child.data.get("name") == name and child.data.get("type") in ("folder", node_type):
-                return child
-        return self.create_child(parent.uuid, {"type": node_type, "name": name}, {}).value
+        return self.ensure_container(parent.uuid, name, node_type).value
 
     @property
     @_session_locked
@@ -771,9 +776,67 @@ class Session:
 
     @_session_locked
     def unregister_application(self, application_id: str) -> None:
-        if application_id == "Sovereign Core profile":
-            raise ValueError("the Core profile registration cannot be removed")
+        if application_id in {"Sovereign Core profile", "Sovereign Core bindings"}:
+            raise ValueError("Core registrations cannot be removed")
         self.shared_topics.unregister(application_id)
+
+    @_session_locked
+    def generic_binding_topics(self) -> list[ProtocolNode]:
+        """Core-owned topics available to capability-scoped field bindings."""
+        return [
+            self._snapshot_node(node)
+            for node in self._protocol.root.live_children()
+            if node.data.get("type") == GENERIC_BINDING_TOPIC_TYPE
+        ]
+
+    def accept_generic_binding_invitation(self, tree: ProtocolNode) -> SessionResult:
+        if tree.data.get("type") != GENERIC_BINDING_TOPIC_TYPE:
+            return SessionResult("error", reason="not a generic binding topic")
+        if any(
+            node.data.get("type") not in {
+                GENERIC_BINDING_TOPIC_TYPE, GENERIC_BINDING_NODE_TYPE,
+            }
+            or (
+                node.data.get("type") == GENERIC_BINDING_NODE_TYPE
+                and bool(node.children)
+            )
+            for node in self._flatten_by_uuid(tree).values()
+        ):
+            return SessionResult(
+                "error", reason="generic binding topic contains application nodes",
+            )
+        return self.adopt_subtree(tree, self._protocol.root.uuid)
+
+    @_session_locked
+    def is_generic_binding_node(
+        self, topic_uuid: str, node_uuid: str, peer_addr: str | None = None,
+    ) -> bool:
+        """Whether a binding target belongs to Core rather than an app."""
+        topic_uuid = str(topic_uuid or "")
+        node_uuid = str(node_uuid or "")
+        topic = self._protocol.index.get(topic_uuid)
+        node = self._protocol.index.get(node_uuid)
+        if (
+            topic
+            and topic.data.get("type") == GENERIC_BINDING_TOPIC_TYPE
+            and node
+            and node.data.get("type") == GENERIC_BINDING_NODE_TYPE
+            and not node.children
+            and self._is_descendant_or_self(topic_uuid, node_uuid)
+        ):
+            return True
+        if not peer_addr:
+            return False
+        peer_topic = self.get_cached_peer_subtree(peer_addr, topic_uuid)
+        peer_node = self.get_cached_peer_subtree(peer_addr, node_uuid)
+        return bool(
+            peer_topic
+            and peer_topic.data.get("type") == GENERIC_BINDING_TOPIC_TYPE
+            and peer_node
+            and peer_node.data.get("type") == GENERIC_BINDING_NODE_TYPE
+            and not peer_node.children
+            and topic_uuid in self.peer_topics_for_node(peer_addr, node_uuid)
+        )
 
     @_session_locked
     def mount_cached_topics(self, application_id: str) -> list[str]:
@@ -815,6 +878,49 @@ class Session:
     @_session_locked
     def shared_topic_handler_for(self, tree: ProtocolNode | None):
         return self.shared_topics.handler_for(tree)
+
+    @_session_locked
+    def topic_kinds(self) -> list[dict]:
+        """What kinds of topic can be made on this client.
+
+        `[{application_id, noun, template_required, templates}]`, from the
+        applications that said how one of theirs is made. An application
+        wanting to offer another's topics - a team making the initiatives it
+        runs, an aggregate making anything - reads this instead of keeping
+        its own table of how each one is created.
+        """
+        return self.shared_topics.topic_kinds()
+
+    @_session_locked
+    def create_application_topic(
+        self, application_id: str, title: str, template: str = "",
+        snapshot: dict | None = None,
+    ) -> SessionResult:
+        """Make a topic of another application's kind, from nothing, from one
+        of its templates, or from a snapshot document it exported.
+
+        The making is that application's, and this reads nothing it is
+        handed: which workflow a template id names, and what a valid
+        snapshot holds, are its answers. What comes back is a uuid.
+        """
+        normalized = str(title or "").strip()
+        if not normalized:
+            return SessionResult("error", reason="a name is required")
+        created = self.shared_topics.make_topic(
+            application_id, normalized, template, snapshot,
+        )
+        if created is None:
+            return SessionResult(
+                "error",
+                reason=f"{application_id or 'that application'} is not available here",
+            )
+        if getattr(created, "status", None) != "ok":
+            return created
+        return SessionResult(
+            "ok",
+            value=str(getattr(created.value, "uuid", created.value) or ""),
+            effects=created.effects,
+        )
 
     @_session_locked
     def supports_shared_topic(self, tree: ProtocolNode | None) -> bool:
@@ -1157,9 +1263,10 @@ class Session:
         identity_key = str(identity.data.get("identity_key") or "")
 
         def retain(node: ProtocolNode) -> None:
+            in_agenda = self._is_agenda_container(node)
             kept = []
             for child in node.children:
-                if child.data.get("type") == "agenda_item" and not (
+                if in_agenda and not (
                     child.data.get("author") == identity.uuid
                     and child.revision_origin == identity_key
                 ):
@@ -1548,34 +1655,45 @@ class Session:
             local = local_by_uuid.get(uuid)
             peer = peer_by_uuid.get(uuid)
             is_compare_root = uuid == compare_uuid
-            event = self._analyze_transition_node(
+            events.append(self._analyze_observed_transition_node(
                 peer_addr,
                 local,
                 peer,
                 is_topic_root=is_compare_root,
-            )
-            observed = bool(
-                local and self.peer_observed_node(peer_addr, local)
-            )
-            event["peer_observed_local_revision"] = observed
-            # Returning a field to an earlier value crosses both content/base
-            # relations. Relay observation supplies the causal direction that
-            # hashes alone cannot: this peer built its new revision on ours.
-            if (
-                observed
-                and local is not None
-                and peer is not None
-                and event["type"] == "local_made_changes"
-                and peer.content_hash == local.base_hash
-                and local.content_hash == peer.base_hash
-                and (
-                    is_compare_root
-                    or local.parent_uuid == peer.parent_uuid
-                )
-            ):
-                event["type"] = "peer_made_changes"
-            events.append(self._stage_transition_event(event))
+            ))
         return events
+
+    def _analyze_observed_transition_node(
+        self,
+        peer_addr: str,
+        local: ProtocolNode | None,
+        peer: ProtocolNode | None,
+        *,
+        is_topic_root: bool = False,
+    ) -> dict:
+        """Classify one pair with the causal observation used by reactions."""
+        event = self._analyze_transition_node(
+            peer_addr, local, peer, is_topic_root=is_topic_root,
+        )
+        observed = bool(local and self.peer_observed_node(peer_addr, local))
+        event["peer_observed_local_revision"] = observed
+        # Returning a field to an earlier value crosses both content/base
+        # relations. Relay observation supplies the causal direction that
+        # hashes alone cannot: this peer built its new revision on ours.
+        if (
+            observed
+            and local is not None
+            and peer is not None
+            and event["type"] == "local_made_changes"
+            and peer.content_hash == local.base_hash
+            and local.content_hash == peer.base_hash
+            and (
+                is_topic_root
+                or local.parent_uuid == peer.parent_uuid
+            )
+        ):
+            event["type"] = "peer_made_changes"
+        return self._stage_transition_event(event)
 
     @staticmethod
     def _flatten_by_uuid(node: ProtocolNode) -> dict[str, ProtocolNode]:
@@ -1588,7 +1706,8 @@ class Session:
 
     @_session_locked
     def create_child(self, parent_uuid: str, data: dict,
-                     weights: dict[str, float] | None = None) -> SessionResult:
+                     weights: dict[str, float] | None = None,
+                     node_uuid: str | None = None) -> SessionResult:
         if (
             not self._creating_identity
             and not (
@@ -1608,6 +1727,7 @@ class Session:
         revision_seq = self._next_local_revision_seq(revision_origin)
         result = self._protocol.create_child(
             parent_uuid, data, weights, revision_origin, revision_seq,
+            node_uuid,
         )
         if not result.ok:
             return SessionResult("error", reason=result.reason)
@@ -1623,6 +1743,40 @@ class Session:
             revision_seq=child.revision_seq,
         )
         return SessionResult("ok", value=self._snapshot_node(child))
+
+    @_session_locked
+    def ensure_container(self, parent_uuid: str, name: str,
+                         node_type: str = "folder") -> SessionResult:
+        """Find or create a named container child, and return it.
+
+        A container is how an application names a set of nodes without Core
+        reading what they are: it hands Core the container's uuid, and
+        ordering and adoption declarations then address a place in the tree
+        rather than a string inside `data`. The application keeps the naming
+        convention, which is its own structure to define; Core only keeps the
+        place.
+
+        Idempotent by name, so the caller may run it on every startup rather
+        than recording whether it has run before.
+
+        A new one is given a uuid derived from its parent's, which is what
+        lets two clients arrive at the same container without either adopting
+        it from the other: the data is identical and neither timestamps nor
+        uuids enter the content hash, so the copies reconcile as agreement. A
+        peer's child of that container then finds its parent already here,
+        which a container invented independently on each side would not.
+        """
+        parent = self._protocol.index.get(parent_uuid)
+        if parent is None:
+            return SessionResult("error", reason="parent not found")
+        for child in parent.live_children():
+            if (child.data.get("name") == name
+                    and child.data.get("type") == node_type):
+                return SessionResult("ok", value=self._snapshot_node(child))
+        return self.create_child(
+            parent_uuid, {"type": node_type, "name": name}, {},
+            node_uuid=f"{name}:{parent_uuid}",
+        )
 
     @_session_locked
     def modify(self, node_uuid: str, data: dict,
@@ -2483,14 +2637,27 @@ class Session:
         local_identity = self._local_revision_origin()
         if not local_identity or local.revision_origin != local_identity:
             return SessionResult("error", reason="local version is not mine to roll back")
-        if rollback_absence and not peer:
+        if rollback_absence:
+            if peer:
+                return SessionResult("error", reason="rollback target is not absent")
             return SessionResult("ok", value=None)
         if not peer:
             return SessionResult("error", reason="rollback version not found")
-        if peer.revision_origin != local_identity:
-            return SessionResult("error", reason="target is another client's revision")
-        if peer.base_hash != local.base_hash:
-            return SessionResult("error", reason="target is not from the same revision wave")
+        # The state a local edit replaced commonly belongs to another person:
+        # B adopts A, edits it, then takes that edit back. Authorship of the
+        # target is therefore not a rollback criterion. The causal relation is:
+        # Core must classify this exact peer target as something the local side
+        # made, and its presentation rule must call choosing it Take back.
+        event = self._analyze_observed_transition_node(
+            peer_addr,
+            local,
+            peer,
+            is_topic_root=self._topic_for_node(node_uuid) == node_uuid,
+        )
+        if self.reaction_for_event(event) != "rollback":
+            return SessionResult(
+                "error", reason="target is not the revision this local change replaced",
+            )
         return SessionResult("ok", value=peer)
 
     @_session_locked
@@ -3078,25 +3245,73 @@ class Session:
 
     # An agenda is what a topic's participants want to talk about, merged
     # across everyone discussing it. That is a collaboration primitive, not a
-    # property of boards, and it needs no new storage: an agenda item is
-    # already a child of the topic root, and every application's topic is a
-    # root. Only the originator may edit or remove their own item; everyone
-    # sees the merged list.
+    # property of any one application, and every application's topic is a
+    # root. Only the
+    # originator may edit or remove their own item; everyone sees the merged
+    # list.
     AGENDA_PRIORITIES = ("high", "medium", "low")
+    # Items hang off a container rather than the topic root, so a projection
+    # can address a peer's agenda by uuid instead of matching a type string
+    # against everything in their tree.
+    #
+    # The uuid is derived from the topic's, which is what makes that work
+    # across perspectives: every client reaches the same one on its own, with
+    # nobody adopting anything. The container's data is identical everywhere
+    # and neither timestamps nor uuids enter the content hash, so a peer's
+    # copy reconciles as agreement rather than as a change.
+    AGENDA_CONTAINER_TYPE = "agenda"
+
+    @staticmethod
+    def agenda_container_uuid(topic_uuid: str) -> str:
+        return f"agenda:{topic_uuid}"
+
+    def _agenda_container(self, topic_uuid: str,
+                          create: bool = True) -> ProtocolNode | None:
+        container_uuid = self.agenda_container_uuid(topic_uuid)
+        container = self._protocol.index.get(container_uuid)
+        if container is None:
+            if not create or self._protocol.index.get(topic_uuid) is None:
+                return None
+            created = self.create_child(
+                topic_uuid,
+                {"type": self.AGENDA_CONTAINER_TYPE, "name": "agenda"},
+                {},
+                node_uuid=container_uuid,
+            )
+            if created.status != "ok":
+                return None
+            container = self._protocol.index.get(container_uuid)
+        # Core's own rule, declared here once instead of by every application
+        # in turn: an agenda is projected from its author's perspective, so
+        # neither the container nor anything under it is ever adopted.
+        self.set_adoption_metadata(
+            container_uuid, adopt=ADOPT_NEVER, additions=ADOPT_NEVER,
+        )
+        return container
+
+    def _is_agenda_container(self, node: ProtocolNode) -> bool:
+        return node.uuid == self.agenda_container_uuid(node.parent_uuid or "")
     # Fractional-order reordering, generic over node type. A moved node gets an
     # "order" value midway between its new neighbours, so a single sibling
     # moves without renumbering the rest. Nodes without an explicit order fall
     # back to their creation position, so the scheme works before anything has
     # ever been moved. Agenda items, agreement sections, and agreement clauses
     # all share this.
-    def _ordered_children(self, parent_uuid: str, node_type: str) -> list[ProtocolNode]:
+    def _ordered_children(self, parent_uuid: str,
+                          node_type: str | None = None) -> list[ProtocolNode]:
+        """This parent's live children in order, optionally of one type.
+
+        `node_type` narrows a parent whose children are of mixed kinds. A
+        container holds one kind, so its uuid says everything the type used to
+        and the argument is left out.
+        """
         parent = self._protocol.index.get(parent_uuid)
         if parent is None:
             return []
         items = sorted(
             [
                 child for child in parent.live_children()
-                if child.data.get("type") == node_type
+                if node_type is None or child.data.get("type") == node_type
             ],
             key=lambda node: node.created_at,
         )
@@ -3116,8 +3331,13 @@ class Session:
             return float(value)
         return fallback
 
-    def next_child_order(self, parent_uuid: str, node_type: str) -> float:
-        """The order value that appends a new child after every existing one."""
+    def next_child_order(self, parent_uuid: str,
+                         node_type: str | None = None) -> float:
+        """The order value that appends a new child after every existing one.
+
+        Omit `node_type` when the parent is a container: its children are one
+        kind by construction, so there is nothing to narrow.
+        """
         existing = self._ordered_children(parent_uuid, node_type)
         if not existing:
             return 0.0
@@ -3203,8 +3423,11 @@ class Session:
         """Agenda records stored in this client's own perspective."""
         identity = self.identity
         identity_key = str(identity.data.get("identity_key") or "")
+        container = self._agenda_container(topic_uuid, create=False)
+        if container is None:
+            return []
         return [
-            item for item in self._ordered_children(topic_uuid, "agenda_item")
+            item for item in self._ordered_children(container.uuid)
             if (
                 item.data.get("author") == identity.uuid
                 and item.revision_origin == identity_key
@@ -3215,7 +3438,7 @@ class Session:
     def project_nodes(
         self,
         topic_uuid: str,
-        node_type: str,
+        parent_uuid: str,
         *,
         included_addresses: set[str] | None = None,
         max_age_seconds: float | None = (
@@ -3224,6 +3447,11 @@ class Session:
         not_before: str | float | datetime | None = None,
     ) -> list[ProjectedNode]:
         """Project verified records without adopting them.
+
+        `topic_uuid` says whose perspectives to read; `parent_uuid` says which
+        container within each of them holds the records. The container carries
+        the same uuid in every perspective, so the caller names a place rather
+        than a type for Core to match.
 
         Core reports and filters factual time information supplied by the
         caller. It assigns no universal meaning to "current" beyond the
@@ -3247,7 +3475,7 @@ class Session:
                 channel_kind=None,
             )
             self._collect_projected_candidates(
-                local_topic, node_type, source, candidates,
+                local_topic, parent_uuid, source, candidates,
             )
 
         permitted = included_addresses
@@ -3293,7 +3521,7 @@ class Session:
                 channel_kind=observation.channel_kind if observation else None,
             )
             self._collect_projected_candidates(
-                topic, node_type, source, candidates,
+                topic, parent_uuid, source, candidates,
             )
 
         resolved = [
@@ -3315,15 +3543,12 @@ class Session:
         items = [
             item for item in self.project_nodes(
                 topic_uuid,
-                "agenda_item",
+                self.agenda_container_uuid(topic_uuid),
                 included_addresses=included_addresses,
                 max_age_seconds=max_age_seconds,
                 not_before=not_before,
             )
-            if (
-                item.data.get("author") == item.perspective.identity_uuid
-                and item.node.parent_uuid == topic_uuid
-            )
+            if item.data.get("author") == item.perspective.identity_uuid
         ]
         return sorted(
             items,
@@ -3338,14 +3563,16 @@ class Session:
     def _collect_projected_candidates(
         self,
         topic: ProtocolNode,
-        node_type: str,
+        parent_uuid: str,
         source: PerspectiveSource,
         candidates: dict[str, list[tuple[ProtocolNode, PerspectiveSource]]],
     ) -> None:
-        for node in self._flatten_by_uuid(topic).values():
+        parent = self._flatten_by_uuid(topic).get(parent_uuid)
+        if parent is None:
+            return
+        for node in parent.live_children():
             if (
-                node.data.get("type") != node_type
-                or node.revision_origin != source.identity_key
+                node.revision_origin != source.identity_key
                 or self.revision_verification(node) != "valid"
             ):
                 continue
@@ -3451,8 +3678,11 @@ class Session:
         normalized = str(text or "").strip()
         if not normalized:
             return SessionResult("error", reason="discussion topic text is required")
+        container = self._agenda_container(topic_uuid)
+        if container is None:
+            return SessionResult("error", reason="agenda container unavailable")
         return self.create_child(
-            topic_uuid,
+            container.uuid,
             {
                 "type": "agenda_item",
                 "text": normalized,
@@ -3524,8 +3754,11 @@ class Session:
             return SessionResult(
                 "error", reason="only locally authored agenda items can be moved",
             )
+        container = self._protocol.index.get(item.parent_uuid or "")
+        if container is None:
+            return SessionResult("error", reason="agenda item not found")
         projected = self.agenda_projection(
-            item.parent_uuid,
+            container.parent_uuid,
             max_age_seconds=max_age_seconds,
             not_before=not_before,
         )
@@ -3626,16 +3859,177 @@ class Session:
     def _is_local_agenda_item(self, item: ProtocolNode) -> bool:
         identity = self.identity
         return (
-            item.data.get("type") == "agenda_item"
+            self._agenda_item(item.uuid) is not None
             and item.data.get("author") == identity.uuid
             and item.revision_origin == identity.data.get("identity_key")
         )
 
     def _agenda_item(self, item_uuid: str) -> ProtocolNode | None:
+        """A node is an agenda item by where it sits, not by what it says."""
         node = self._protocol.index.get(item_uuid)
-        if node is None or node.data.get("type") != "agenda_item":
+        if node is None:
+            return None
+        parent = self._protocol.index.get(node.parent_uuid or "")
+        if parent is None or not self._is_agenda_container(parent):
             return None
         return node
+
+    # The small links under a topic title are navigation history, not claims
+    # about either topic. They therefore live in the local session envelope:
+    # no protocol revision, peer publication, adoption, or access follows
+    # from adding one. Applications own actual domain relationships as their
+    # own node types in their own areas.
+    NAVIGATION_LINKS_KEY = "navigation_links"
+
+    def _navigation_link_store(self) -> list[dict[str, str]]:
+        stored = self._app_metadata.setdefault(self.NAVIGATION_LINKS_KEY, [])
+        if not isinstance(stored, list):
+            stored = []
+            self._app_metadata[self.NAVIGATION_LINKS_KEY] = stored
+        return stored
+
+    def _navigation_topic(self, topic_uuid: str) -> ProtocolNode | None:
+        node = self._protocol.index.get(str(topic_uuid or ""))
+        handler = self.shared_topic_handler_for(node) if node is not None else None
+        if (
+            node is None
+            or node.deleted
+            or handler is None
+            or not str(handler.topic_noun or "").strip()
+        ):
+            return None
+        return node
+
+    def _navigation_topic_view(self, topic: ProtocolNode) -> dict[str, str]:
+        handler = self.shared_topic_handler_for(topic)
+        return {
+            "topic_uuid": topic.uuid,
+            "application_id": handler.application_id if handler else "",
+            "label": (handler.topic_noun if handler else "") or "Topic",
+            "title": str(
+                topic.data.get("title")
+                or topic.data.get("name")
+                or "Untitled"
+            ),
+        }
+
+    @_session_locked
+    def create_navigation_link(
+        self, parent_uuid: str, topic_uuid: str,
+    ) -> SessionResult:
+        parent = self._navigation_topic(parent_uuid)
+        target = self._navigation_topic(topic_uuid)
+        if parent is None:
+            return SessionResult("error", reason="navigation source is not held")
+        if target is None:
+            return SessionResult("error", reason="navigation target is not held")
+        if parent.uuid == target.uuid:
+            return SessionResult("error", reason="a topic cannot link to itself")
+        stored = self._navigation_link_store()
+        if any(
+            item.get("parent_uuid") == parent.uuid
+            and item.get("topic_uuid") == target.uuid
+            for item in stored if isinstance(item, dict)
+        ):
+            return SessionResult("error", reason="that navigation link already exists")
+        link_uuid = str(uuid_mod.uuid4())
+        stored.append({
+            "uuid": link_uuid,
+            "parent_uuid": parent.uuid,
+            "topic_uuid": target.uuid,
+        })
+        return SessionResult("ok", value=link_uuid)
+
+    @_session_locked
+    def remove_navigation_link(
+        self, parent_uuid: str, link_uuid: str,
+    ) -> SessionResult:
+        parent = self._navigation_topic(parent_uuid)
+        if parent is None:
+            return SessionResult("error", reason="navigation source is not held")
+        target = str(link_uuid or "")
+        stored = self._navigation_link_store()
+        for index, item in enumerate(stored):
+            if (
+                isinstance(item, dict)
+                and item.get("uuid") == target
+                and item.get("parent_uuid") == parent.uuid
+            ):
+                stored.pop(index)
+                return SessionResult("ok", value=target)
+        return SessionResult("error", reason="navigation link not found")
+
+    @_session_locked
+    def navigation_links(self, parent_uuid: str) -> list[dict[str, Any]]:
+        parent = self._navigation_topic(parent_uuid)
+        if parent is None:
+            return []
+        links = []
+        for item in self._navigation_link_store():
+            if not isinstance(item, dict) or item.get("parent_uuid") != parent.uuid:
+                continue
+            target = self._navigation_topic(str(item.get("topic_uuid") or ""))
+            if target is None:
+                continue
+            links.append({
+                "uuid": str(item.get("uuid") or ""),
+                **self._navigation_topic_view(target),
+            })
+        return sorted(links, key=lambda item: item["title"].lower())
+
+    @_session_locked
+    def navigation_candidates(self, parent_uuid: str) -> list[dict[str, str]]:
+        parent = self._navigation_topic(parent_uuid)
+        if parent is None:
+            return []
+        linked = {item["topic_uuid"] for item in self.navigation_links(parent.uuid)}
+        candidates = []
+        for topic_uuid in self.shared_topic_uuids():
+            if topic_uuid == parent.uuid or topic_uuid in linked:
+                continue
+            topic = self._navigation_topic(topic_uuid)
+            if topic is not None:
+                candidates.append(self._navigation_topic_view(topic))
+        return sorted(candidates, key=lambda item: (
+            item["label"].lower(), item["title"].lower(),
+        ))
+
+    @_session_locked
+    def drop_topic(self, topic_uuid: str) -> SessionResult:
+        """Stop holding a topic without destroying it.
+
+        Nothing is published, because nothing is deleted - a peer sees this
+        client stop publishing, which is what it also sees when somebody
+        closes their laptop. It is the opposite act to `delete`, which writes
+        a tombstone that travels and which stays with the application that
+        owns the topic, the only one that knows who may destroy it.
+
+        A peer who still publishes the topic will offer it back as an
+        invitation. That is intended: nothing was destroyed, this client
+        stopped keeping it, and it remains available.
+        """
+        target = str(topic_uuid or "").strip()
+        node = self._protocol.index.get(target)
+        if node is None:
+            return SessionResult("error", reason="topic not found")
+        # A local shortcut neither keeps a topic alive nor prevents dropping
+        # it. Remove shortcuts whose source or destination is going away.
+        self._app_metadata[self.NAVIGATION_LINKS_KEY] = [
+            item for item in self._navigation_link_store()
+            if isinstance(item, dict)
+            and item.get("parent_uuid") != target
+            and item.get("topic_uuid") != target
+        ]
+        released = self.end_topic_sharing(target)
+        removed = self._protocol.remove_subtree_uuids(
+            self._protocol.root.uuid, {target},
+        )
+        if not removed.ok:
+            return SessionResult("error", reason=removed.reason)
+        self.trace_event("session.topic_dropped", topic_uuid=target)
+        return SessionResult(
+            "ok", value=target, effects=list(released.effects),
+        )
 
     def known_identities(self) -> list[dict]:
         """Every identity this session can currently put a name and picture to.
@@ -3706,7 +4100,23 @@ class Session:
                 return str(candidate.data.get("identity_key") or "") or None
         return None
 
-    def reaction_for_event(self, event: dict) -> str:
+    def event_authored_locally(self, event: dict) -> bool:
+        """Whether the revision described as the act belongs to this identity."""
+        local_identity = self._local_revision_origin()
+        if not local_identity:
+            return False
+        origin = event.get("origin_identity")
+        if not origin:
+            origin = (
+                event.get("local_revision_origin")
+                if event.get("type") in (
+                    "local_made_changes", "peer_missing_node",
+                )
+                else event.get("peer_revision_origin")
+            )
+        return origin == local_identity
+
+    def reaction_for_event(self, event: dict) -> str | None:
         """Which reaction resolves this transition: "adopt" or "rollback".
 
         Reacting is how a divergence is left behind, so every application
@@ -3714,21 +4124,142 @@ class Session:
         Core vocabulary - revision origins and base hashes - so it belongs
         here rather than being re-derived per application.
 
-        "rollback" when the local side authored the revision the peer is
-        answering, so the peer's copy is the stale one; "adopt" otherwise.
+        A relation already says which side is newer. Authorship then says
+        whether choosing the peer target adopts somebody else's alternative
+        or takes back this identity's own local act.
         """
         local_identity = self._local_revision_origin()
         local_origin = event.get("local_revision_origin")
         peer_origin = event.get("peer_revision_origin")
-        same_local_wave = (
-            peer_origin == local_identity
+        relation = event.get("type")
+        if relation == "in_agreement":
+            return None
+        if (
+            relation in ("local_made_changes", "peer_missing_node")
+            and self.event_authored_locally(event)
+        ):
+            return "rollback"
+        # A true divergence normally means choosing another author's branch,
+        # hence Adopt. The exception is an older revision from this identity's
+        # same revision wave: selecting it really does take the local act back.
+        if (
+            relation == "divergence"
+            and local_identity
+            and local_origin == local_identity
+            and peer_origin == local_identity
             and event.get("local_base_hash") == event.get("peer_base_hash")
-        )
-        if (local_identity and local_origin == local_identity
-                and (same_local_wave
-                     or event.get("type") == "peer_missing_node")):
+        ):
             return "rollback"
         return "adopt"
+
+    def group_transition_events(self, events: list[dict]) -> dict[str, dict]:
+        """Group transition events by node without losing peer choices.
+
+        A node may be reported by several peers. Identical target revisions
+        become one choice with multiple delivery addresses; genuinely
+        different targets remain separate choices. The highest-ranked event
+        supplies the node's headline fields while ``events`` retains every
+        actionable alternative for presentation and reaction.
+        """
+        grouped: dict[str, dict] = {}
+        for raw_event in events:
+            event = copy.deepcopy(raw_event)
+            node_uuid = str(event.get("node_uuid") or "")
+            if not node_uuid:
+                continue
+            event["authored_locally"] = self.event_authored_locally(event)
+            event["reaction"] = self.reaction_for_event(event)
+            event["priority"] = self.transition_rank(event)
+
+            current = grouped.get(node_uuid)
+            if current is None:
+                headline = copy.deepcopy(event)
+                headline["events"] = (
+                    []
+                    if event.get("type") == "in_agreement"
+                    else [copy.deepcopy(event)]
+                )
+                grouped[node_uuid] = headline
+                continue
+
+            if event.get("type") != "in_agreement":
+                signature = self._transition_target_signature(event)
+                identical = next(
+                    (
+                        candidate for candidate in current.get("events", [])
+                        if self._transition_target_signature(candidate) == signature
+                    ),
+                    None,
+                )
+                if identical is None:
+                    current.setdefault("events", []).append(event)
+                else:
+                    self._merge_transition_delivery(identical, event)
+                    if (
+                        self._transition_target_signature(current)
+                        == signature
+                    ):
+                        self._merge_transition_delivery(current, event)
+                    event = identical
+
+            if self.transition_rank(event) > self.transition_rank(current):
+                retained_events = current.get("events", [])
+                current.update(copy.deepcopy(event))
+                current["events"] = retained_events
+
+        return grouped
+
+    @staticmethod
+    def _transition_target_signature(event: dict) -> tuple:
+        """Identify the target state represented by one transition event."""
+        if event.get("type") == "peer_missing_node":
+            return ("absence",)
+        peer_revision = event.get("peer_revision") or event.get("peer_state_hash")
+        if not peer_revision:
+            # Incomplete/synthetic events cannot prove target identity. Keep
+            # them separate rather than accidentally collapsing an unknown
+            # divergence into an absence choice.
+            return (
+                "unknown",
+                event.get("type"),
+                event.get("peer_addr"),
+                event.get("origin_identity"),
+            )
+        return (
+            "revision",
+            event.get("peer_revision_origin"),
+            peer_revision,
+        )
+
+    def _merge_transition_delivery(self, target: dict, delivery: dict) -> None:
+        """Record another peer able to deliver an identical target state."""
+        retained_events = target.get("events")
+        original_addr = target.get("peer_addr")
+        original_deliveries = list(target.get("delivery_peer_addrs") or [])
+        if self.transition_rank(delivery) > self.transition_rank(target):
+            target.update(copy.deepcopy(delivery))
+            if retained_events is not None:
+                target["events"] = retained_events
+        addresses = []
+        for peer_addr in (
+            original_addr,
+            *original_deliveries,
+            target.get("peer_addr"),
+            delivery.get("peer_addr"),
+            *(delivery.get("delivery_peer_addrs") or []),
+        ):
+            if peer_addr and peer_addr not in addresses:
+                addresses.append(peer_addr)
+        target["delivery_peer_addrs"] = addresses
+
+        target_origin = target.get("origin_identity")
+        origin_addr = next((
+            peer_addr for peer_addr in addresses
+            if target_origin
+            and self.peer_identity_key_for_address(peer_addr) == target_origin
+        ), None)
+        if origin_addr:
+            target["peer_addr"] = origin_addr
 
     # How loudly each transition should speak when one node carries several.
     # Session decides what the words mean, so Session ranks them; applications

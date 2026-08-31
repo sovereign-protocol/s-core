@@ -45,8 +45,8 @@
       item.textContent = note.text;
       return item;
     }));
-    // Topic selection is the shell's, so the application only names its topic.
-    SovereignShell.setTopicSelector({ topicUuid: state.list_uuid });
+    // The bar is the shell's, so the application only names its topic.
+    SovereignShell.setTopicName({ label: "Notes" });
   }
 
   document.getElementById("add-note").addEventListener("submit", async (event) => {

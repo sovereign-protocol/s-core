@@ -273,13 +273,22 @@ class ProtocolState:
     def create_child(self, parent_uuid: str, data: dict,
                      weights: dict | None = None,
                      revision_origin: str | None = None,
-                     revision_seq: int = 0) -> ProtocolResult:
+                     revision_seq: int = 0,
+                     node_uuid: str | None = None) -> ProtocolResult:
         parent = self.index.get(parent_uuid)
         if not parent:
             return ProtocolResult(False, reason="parent not found")
         child = ProtocolNode(
             data, weights, parent_uuid, revision_origin, revision_seq,
         )
+        if node_uuid:
+            # A caller-supplied uuid is how two clients reach the same node
+            # without either adopting it from the other. Neither hash covers
+            # the uuid, so assigning it before the node is indexed needs no
+            # rehash, and the signature is applied afterwards.
+            if node_uuid in self.index:
+                return ProtocolResult(False, reason="node uuid already in use")
+            child.uuid = node_uuid
         parent.children.append(child)
         self.index_subtree(child)
         self.cascade_hash(parent_uuid)
@@ -454,7 +463,7 @@ class ProtocolState:
         # only moves ancestors' subtree (state) hash - their own content_hash
         # is unchanged - and it never touches any base_hash: base advances
         # solely via _begin_revision on the directly edited node. This is why
-        # a card edit no longer manufactures a revision of its column/board.
+        # a card edit no longer manufactures a revision of its column or root.
         current_uuid = node_uuid
         while current_uuid:
             node = self.index.get(current_uuid)

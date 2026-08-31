@@ -320,6 +320,10 @@ class MailboxChannel:
                 storage.close()
                 # Shutdown may be entered again after a partial lifespan failure.
                 # Mark the resource closed so a second pass remains a no-op.
+                # Assigned directly rather than through RelayLogic._set_storage:
+                # this is a closed resource being marked, not a backend being
+                # installed, and nothing here should need the connection to be
+                # a RelayLogic at all.
                 if connection.storage is storage:
                     connection.storage = None
 

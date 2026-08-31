@@ -49,8 +49,8 @@ class ManualLogic:
     def move(self, source_uuid: str, destination_uuid: str) -> SessionResult:
         return self.session.move(source_uuid, destination_uuid)
 
-    def accept_peer_node(self, source_addr: str, node_uuid: str,
-                         adopt_absence: bool = False) -> SessionResult:
+    def adopt_peer_node(self, source_addr: str, node_uuid: str,
+                        adopt_absence: bool = False) -> SessionResult:
         if adopt_absence:
             return self.session.delete(node_uuid)
         peer = self.session.get_cached_peer_subtree(source_addr, node_uuid)

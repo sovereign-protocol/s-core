@@ -27,10 +27,26 @@ Offered API:
     roughly two timeouts rather than the minute the old default allowed.
     Raise it with relay_sftp_operation_timeout for a genuinely slow link.
     Both satisfy RelayStorage, including:
-    write_snapshot(topic_uuid, peer_id, state_hash, payload)
+    write_snapshot(topic_uuid, peer_id, state_hash, payload, blob_ids,
+                   publication)
+      Writes the subtree and the head that names it. `publication` carries
+      the head's own metadata (sequence, acknowledgement, observations); it
+      is not part of the snapshot, so `snapshots/<hash>.json` is a pure
+      function of the hash and never rewritten under it.
+    write_head(topic_uuid, peer_id, state_hash, blob_ids, publication)
+      The same head without the subtree, for a publication whose content did
+      not change - an acknowledgement moving a sequence number. Two
+      operations rather than four, and it leaves the snapshot alone.
     read_head(topic_uuid, peer_id) -> dict | None
     read_snapshot(topic_uuid, peer_id, state_hash) -> dict | None
     list_peers(topic_uuid) -> list[str]
+    list_peers_with_mtimes(topic_uuid) -> list[tuple[str, float | None]]
+      Each peer's slot and when it was last written to, from the one
+      directory listing. A head is renamed into its peer directory, so an
+      unchanged mtime here means an unchanged head - which is how a poll
+      avoids reading every head on every cycle. Whole-second resolution on
+      SFTP, so a caller must not trust an mtime younger than
+      mtime_resolution_seconds (see relay_logic.poll_and_apply).
     list_topics() -> list[str]
     delete_publication(topic_uuid, peer_id) -> None
       Removes only one peer's publication from a topic.
@@ -97,6 +113,36 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def head_document(topic_uuid: str, peer_id: str, state_hash: str,
+                  blob_ids: set[str] | None, publication: dict | None,
+                  previous: dict) -> dict:
+    """The head a publication writes, from what the publisher passed in.
+
+    The publication metadata used to travel inside the snapshot payload, on
+    `_relay_*` keys, purely so this function could copy it back out. Nothing
+    ever read those keys off a downloaded snapshot except a race check that
+    existed because of them. Taking them as an argument instead is what makes
+    a head-only write expressible - and it makes `snapshots/<hash>.json` a
+    pure function of the hash it is named after, which is the property a
+    content-addressed file should have had all along.
+    """
+    publication = publication or {}
+    return {
+        "peer": peer_id,
+        "topic": topic_uuid,
+        "hash": state_hash,
+        "publication_seq": publication.get("publication_seq", 0),
+        "ack_requested": bool(publication.get("ack_requested", False)),
+        "ack_publication_seq": publication.get("ack_publication_seq", 0),
+        "updated_at": now_iso(),
+        "snapshot": f"snapshots/{state_hash}.json",
+        "observed": publication.get("observed", {}),
+        "observed_publications": publication.get("observed_publications", {}),
+        "blobs": sorted(blob_ids or set()),
+        "previous_blobs": sorted(previous.get("blobs") or []),
+    }
+
+
 @runtime_checkable
 class RelayStorage(Protocol):
     """Storage contract required by one relay polling endpoint."""
@@ -106,6 +152,12 @@ class RelayStorage(Protocol):
     def write_snapshot(
         self, topic_uuid: str, peer_id: str, state_hash: str,
         payload: dict, blob_ids: set[str] | None = None,
+        publication: dict | None = None,
+    ) -> None: ...
+
+    def write_head(
+        self, topic_uuid: str, peer_id: str, state_hash: str,
+        blob_ids: set[str] | None = None, publication: dict | None = None,
     ) -> None: ...
 
     def verify_access(self) -> None: ...
@@ -126,6 +178,9 @@ class RelayStorage(Protocol):
         self, topic_uuid: str, peer_id: str, state_hash: str,
     ) -> dict | None: ...
     def list_peers(self, topic_uuid: str) -> list[str]: ...
+    def list_peers_with_mtimes(
+        self, topic_uuid: str,
+    ) -> list[tuple[str, float | None]]: ...
     def list_topics(self) -> list[str]: ...
     def delete_publication(self, topic_uuid: str, peer_id: str) -> None: ...
     def delete_topic(self, topic_uuid: str) -> None: ...
@@ -147,31 +202,16 @@ class LocalFolderRelayStorage:
         """Local filesystem storage owns no persistent connection."""
 
     def write_snapshot(self, topic_uuid: str, peer_id: str, state_hash: str,
-                       payload: dict, blob_ids: set[str] | None = None) -> None:
+                       payload: dict, blob_ids: set[str] | None = None,
+                       publication: dict | None = None) -> None:
         peer_dir = self._peer_dir(topic_uuid, peer_id)
         snapshots_dir = peer_dir / "snapshots"
         snapshots_dir.mkdir(parents=True, exist_ok=True)
         previous = self._read_json(peer_dir / "head.json") or {}
         self._write_json(snapshots_dir / f"{state_hash}.json", payload)
-        head = {
-            "peer": peer_id,
-            "topic": topic_uuid,
-            "hash": state_hash,
-            "publication_seq": payload.get("_relay_publication_seq", 0),
-            "ack_requested": bool(payload.get("_relay_ack_requested", False)),
-            "ack_publication_seq": payload.get(
-                "_relay_ack_publication_seq", 0,
-            ),
-            "updated_at": now_iso(),
-            "snapshot": f"snapshots/{state_hash}.json",
-            "observed": payload.get("_relay_observed", {}),
-            "observed_publications": payload.get(
-                "_relay_observed_publications", {},
-            ),
-            "blobs": sorted(blob_ids or set()),
-            "previous_blobs": sorted(previous.get("blobs") or []),
-        }
-        self._write_json(peer_dir / "head.json", head)
+        self._write_json(peer_dir / "head.json", head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
         # GC superseded snapshots (review R-4): keep the new one plus the
         # immediately-previous head's, so a lagging peer mid-fetch of the
         # prior hash still finds it; older ones would otherwise accumulate
@@ -180,6 +220,15 @@ class LocalFolderRelayStorage:
         for entry in snapshots_dir.iterdir():
             if entry.is_file() and entry.name not in keep:
                 entry.unlink()
+
+    def write_head(self, topic_uuid: str, peer_id: str, state_hash: str,
+                   blob_ids: set[str] | None = None,
+                   publication: dict | None = None) -> None:
+        peer_dir = self._peer_dir(topic_uuid, peer_id)
+        previous = self._read_json(peer_dir / "head.json") or {}
+        self._write_json(peer_dir / "head.json", head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
 
     def verify_access(self) -> None:
         """Verify that the configured relay root is writable."""
@@ -271,10 +320,9 @@ class LocalFolderRelayStorage:
     def read_head_with_mtime(
         self, topic_uuid: str, peer_id: str,
     ) -> tuple[dict | None, float | None]:
-        path = self._peer_dir(topic_uuid, peer_id) / "head.json"
-        if not path.is_file():
-            return None, None
-        return self._read_json(path), path.stat().st_mtime
+        return self._read_json_with_mtime(
+            self._peer_dir(topic_uuid, peer_id) / "head.json",
+        )
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
@@ -286,6 +334,15 @@ class LocalFolderRelayStorage:
         if not peers_dir.is_dir():
             return []
         return sorted(entry.name for entry in peers_dir.iterdir() if entry.is_dir())
+
+    def list_peers_with_mtimes(self, topic_uuid: str) -> list[tuple[str, float | None]]:
+        peers_dir = self.root / "topics" / topic_uuid / "peers"
+        if not peers_dir.is_dir():
+            return []
+        return sorted(
+            (entry.name, entry.stat().st_mtime)
+            for entry in peers_dir.iterdir() if entry.is_dir()
+        )
 
     def list_topics(self) -> list[str]:
         topics_dir = self.root / "topics"
@@ -311,10 +368,7 @@ class LocalFolderRelayStorage:
         return path.stat().st_mtime
 
     def read_presence_with_mtime(self, peer_id: str) -> tuple[dict | None, float | None]:
-        path = self._presence_path(peer_id)
-        if not path.is_file():
-            return None, None
-        return self._read_json(path), path.stat().st_mtime
+        return self._read_json_with_mtime(self._presence_path(peer_id))
 
     def timing_probe(self) -> tuple[float | None, float]:
         """Return server mtime plus one metadata-request roundtrip."""
@@ -350,6 +404,20 @@ class LocalFolderRelayStorage:
             return None
         with path.open(encoding="utf-8") as f:
             return json.load(f)
+
+    @staticmethod
+    def _read_json_with_mtime(path: Path) -> tuple[dict | None, float | None]:
+        # Content and timestamp from one open handle, matching the SFTP
+        # backend, where the difference is a whole round trip rather than a
+        # syscall. Taking both from the same visit is also the only way they
+        # are guaranteed to describe the same version of the file.
+        try:
+            with path.open("rb") as f:
+                data = f.read()
+                mtime = os.fstat(f.fileno()).st_mtime
+        except FileNotFoundError:
+            return None, None
+        return json.loads(data.decode("utf-8")), mtime
 
 
 class SftpRelayStorage:
@@ -400,34 +468,28 @@ class SftpRelayStorage:
         self._reset_connection()
 
     def write_snapshot(self, topic_uuid: str, peer_id: str, state_hash: str,
-                       payload: dict, blob_ids: set[str] | None = None) -> None:
+                       payload: dict, blob_ids: set[str] | None = None,
+                       publication: dict | None = None) -> None:
         peer_dir = self._peer_dir(topic_uuid, peer_id)
         snapshots_dir = posixpath.join(peer_dir, "snapshots")
         previous = self._read_json(posixpath.join(peer_dir, "head.json")) or {}
         self._write_json(posixpath.join(snapshots_dir, f"{state_hash}.json"), payload)
-        head = {
-            "peer": peer_id,
-            "topic": topic_uuid,
-            "hash": state_hash,
-            "publication_seq": payload.get("_relay_publication_seq", 0),
-            "ack_requested": bool(payload.get("_relay_ack_requested", False)),
-            "ack_publication_seq": payload.get(
-                "_relay_ack_publication_seq", 0,
-            ),
-            "updated_at": now_iso(),
-            "snapshot": f"snapshots/{state_hash}.json",
-            "observed": payload.get("_relay_observed", {}),
-            "observed_publications": payload.get(
-                "_relay_observed_publications", {},
-            ),
-            "blobs": sorted(blob_ids or set()),
-            "previous_blobs": sorted(previous.get("blobs") or []),
-        }
-        self._write_json(posixpath.join(peer_dir, "head.json"), head)
+        self._write_json(posixpath.join(peer_dir, "head.json"), head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
         self._gc_snapshots(
             snapshots_dir,
             keep={f"{state_hash}.json", f"{previous.get('hash')}.json"},
         )
+
+    def write_head(self, topic_uuid: str, peer_id: str, state_hash: str,
+                   blob_ids: set[str] | None = None,
+                   publication: dict | None = None) -> None:
+        peer_dir = self._peer_dir(topic_uuid, peer_id)
+        previous = self._read_json(posixpath.join(peer_dir, "head.json")) or {}
+        self._write_json(posixpath.join(peer_dir, "head.json"), head_document(
+            topic_uuid, peer_id, state_hash, blob_ids, publication, previous,
+        ))
 
     def _gc_snapshots(self, snapshots_dir: str, keep: set[str]) -> None:
         # Drop superseded snapshots (review R-4), keeping the new head's
@@ -601,11 +663,9 @@ class SftpRelayStorage:
     def read_head_with_mtime(
         self, topic_uuid: str, peer_id: str,
     ) -> tuple[dict | None, float | None]:
-        path = posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json")
-        content = self._read_json(path)
-        if content is None:
-            return None, None
-        return content, self._stat_mtime(path)
+        return self._read_json_with_mtime(
+            posixpath.join(self._peer_dir(topic_uuid, peer_id), "head.json"),
+        )
 
     def read_snapshot(self, topic_uuid: str, peer_id: str,
                       state_hash: str) -> dict | None:
@@ -614,6 +674,11 @@ class SftpRelayStorage:
 
     def list_peers(self, topic_uuid: str) -> list[str]:
         return self._list_dir(posixpath.join(self.root, "topics", topic_uuid, "peers"))
+
+    def list_peers_with_mtimes(self, topic_uuid: str) -> list[tuple[str, float | None]]:
+        return self._list_dir_with_mtimes(
+            posixpath.join(self.root, "topics", topic_uuid, "peers"),
+        )
 
     def list_topics(self) -> list[str]:
         return self._list_dir(posixpath.join(self.root, "topics"))
@@ -670,11 +735,7 @@ class SftpRelayStorage:
         return self._with_retry(operation)
 
     def read_presence_with_mtime(self, peer_id: str) -> tuple[dict | None, float | None]:
-        path = self._presence_path(peer_id)
-        content = self._read_json(path)
-        if content is None:
-            return None, None
-        return content, self._stat_mtime(path)
+        return self._read_json_with_mtime(self._presence_path(peer_id))
 
     def timing_probe(self) -> tuple[float | None, float]:
         """Measure one SFTP request and remove the clock probe afterwards."""
@@ -861,6 +922,46 @@ class SftpRelayStorage:
                     return json.loads(f.read().decode("utf-8"))
             except FileNotFoundError:
                 return None
+
+        return self._with_retry(operation)
+
+    def _read_json_with_mtime(self, path: str) -> tuple[dict | None, float | None]:
+        # One visit, not two. Reading the bytes and then stat-ing the path
+        # cost a whole extra round trip on every head and every heartbeat -
+        # per peer, per topic, per cycle - for a timestamp the open handle
+        # already answers. Same saving write_presence takes on the way out.
+        #
+        # It is also the only correct way to pair them: a separate stat can
+        # observe a version the read did not, and this mtime is what decides
+        # both how stale a peer's perspective is and, now, whether its head
+        # is worth reading again at all.
+        def operation(sftp):
+            try:
+                with sftp.open(path, "rb") as f:
+                    data = f.read()
+                    mtime = f.stat().st_mtime
+            except FileNotFoundError:
+                return None, None
+            return json.loads(data.decode("utf-8")), mtime
+
+        return self._with_retry(operation)
+
+    def _list_dir_with_mtimes(self, path: str) -> list[tuple[str, float | None]]:
+        # listdir_attr already carries every entry's mtime; the plain listing
+        # throws it away and the caller then pays a read per entry to learn
+        # what changed. A peer's head is renamed into its directory, which
+        # moves that directory's mtime, so this listing answers "is there
+        # anything new here" for the whole topic in the round trip it was
+        # already making.
+        def operation(sftp):
+            try:
+                attrs = sftp.listdir_attr(path)
+            except FileNotFoundError:
+                return []
+            return sorted(
+                (a.filename, a.st_mtime)
+                for a in attrs if stat.S_ISDIR(a.st_mode or 0)
+            )
 
         return self._with_retry(operation)
 

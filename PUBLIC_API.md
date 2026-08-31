@@ -115,6 +115,79 @@ exposes detached query snapshots plus explicit board, card, agenda, reaction,
 and policy commands. S-Cockpit consumes it without declaring S-Initiative
 as a package dependency.
 
+## Making a topic
+
+An application says how one of its own topics is made, once, on its
+`ApplicationRegistration`: `topic_noun` (what one is called to a person),
+`template_required`, `list_templates()` returning `{value, name, description}`,
+and `create_topic(title, template, snapshot)` returning a `SessionResult`
+naming the new topic. All three ways of starting are its own — from nothing,
+from a template it listed, or from a snapshot document it exported. An
+application that leaves these out cannot have one of its topics made from
+anywhere else, which is the right answer for one that owns none.
+
+Anybody offering to make another application's topic reads that:
+
+- `Session.topic_kinds()` — `[{application_id, noun, template_required,
+  templates}]` for the applications running here that said how. A kind that is
+  not present is not offered, rather than offered and then refused.
+- `Session.create_application_topic(application_id, title, template="",
+  snapshot=None)` — makes one and returns its uuid. Core reads neither the
+  template id nor the snapshot document; what a valid one contains is the
+  owning application's answer.
+
+This replaced a table in each of three applications — a noun, a facade api
+version, a per-kind template lookup and a create path per kind — all of them
+restating what the owning application already knew, and drifting: one could
+start a team from a file and another could not.
+
+## Navigation links and connected work
+
+The under-title row and its dialog draw two Core-owned kinds of connection
+side by side. See `DESIGN_NAVIGATION_LINKS.md` for the full design.
+
+**Navigation links** are local metadata, not protocol nodes. Both ends must
+already be held and registered here.
+
+- `create_navigation_link(parent_uuid, topic_uuid)` adds a shortcut without a
+  protocol revision or network effect.
+- `navigation_links(parent_uuid)` resolves its title and owning application
+  live from the target topic.
+- `navigation_candidates(parent_uuid)` lists other held registered topics not
+  already linked from this one.
+- `remove_navigation_link(parent_uuid, link_uuid)` removes only that shortcut.
+
+Dropping either endpoint clears matching shortcuts and is never blocked by
+them. The shared browser shell exposes the same operations at
+`GET/POST /api/core/navigation/{topic_uuid}`.
+
+**Connected work** (`sovereign_relationship`, `RelationshipService` in
+`relationships.py`) is the opposite on every count: a real protocol node,
+per-actor authored, and shared wherever the source topic already publishes.
+An application that must recognize this type in its own tree - to authorize
+an incoming peer's connection, say - matches the literal type name, the same
+way it already matches every other node type it does not own.
+
+- `create_relationship(parent_uuid, topic_uuid)` connects an already-held
+  topic, running any registered `validate_relationship` hook first.
+- `create_and_share_topic(parent_uuid, application_id, title, template, snapshot)`
+  makes a new topic and connects it, bridged to wherever the source
+  publishes.
+- `connect_relationship(parent_uuid, topic_uuid)` joins a topic somebody
+  else already connected, and adds this actor's own connection to it.
+- `relationships(parent_uuid)` is the union view: live while any actor's
+  connection to that target survives.
+- `remove_relationship(parent_uuid, relationship_uuid)` removes only this
+  actor's own connection, then runs any registered `on_relationship_removed`
+  hook - Core has already deleted the record; the hook is for a local
+  consequence only the owning application knows about.
+- `relationship_candidates(parent_uuid)` splits into `shared` (already on
+  this bridge) and `own` (this client's other items, of a registered kind,
+  not yet shared here).
+
+The shared browser shell exposes the same operations at
+`GET/POST /api/core/relationships/{topic_uuid}`.
+
 ## Channel extension API
 
 `Channel` is the required extension contract. A channel opts into independent
@@ -178,3 +251,69 @@ to `Session.reconcile_peer_changes(..., reconciliation_policies=...)` makes
 Core reject stale candidates, resolve a newer eligible candidate, and normalize
 timestamp-only differences. Other field differences remain ordinary
 transitions; applications still decide which semantic changes may be adopted.
+
+`Session.group_transition_events(events)` is the canonical per-node transition
+projection. It adds Core's reaction, authorship, and priority; merges identical
+target revisions delivered by several peers even when their causal
+classification differs; retains distinct targets as choices; and selects the
+highest-ranked event as the headline.
+
+Reaction direction follows relation first and authorship second. Incoming or
+locally missing revisions are Adopt. A locally newer revision, or a locally
+present node missing remotely, is Take back only when this identity authored
+the local act; otherwise choosing the peer target is Adopt. Settled events have
+no reaction. `rollback_peer_node` validates the same relation, so taking back
+an edit may correctly restore the prior revision authored by another person;
+requesting rollback-to-absence is accepted only when the peer target is truly
+absent.
+
+## Browser projection and generic bindings
+
+`shared.js` exposes pane-independent `SovereignUI.transitionMarker`,
+`decorateTransition`, `adoptionPolicyMarker`, `decorateAdoptionPolicy`,
+`reactionControl`, `reactionPresentation`, `actionMenu`, and `actionButton`.
+Applications own placement and authorization; Core owns
+stage decoration, action icons, wording, menus, focus behavior, and tooltips.
+`transitionMarker` defaults to the temporary `in_flight` pulse; steady open
+stages remain visible through `decorateTransition`'s wash and leading edge.
+An effective `hold` policy is a quiet outline hand with the explanation
+"Changes here wait for your approval." It is absent for `auto` and whenever a
+real transition exists, because current state takes precedence over policy.
+
+`sovereign-client.js` exposes `SovereignClient.connect({baseUrl, capability})`.
+Its `bindField(element, {topicUuid, nodeUuid, field, debounceMs})` binds an
+ordinary input or textarea to a Core-owned `sovereign_binding` node, commits on
+blur or at the configured debounce boundary, retains separate confirmed and
+pending values, polls peer state, and renders inline transitions and reactions
+without the shell. Its read view includes the effective inherited
+`adoption_policy`, so the client also applies the hand without reproducing
+Session's inheritance rules.
+
+The host reads `generic_binding_capabilities` from configuration. Each entry
+names an exact origin, topic UUID, node UUID, allowed fields and operations,
+and secret token. The API refuses application-owned topics: generic access is
+limited to `sovereign_binding` nodes under a `sovereign_binding_topic`. Channel
+configuration is not part of this capability and still uses the normal consent
+flow.
+
+```json
+{
+  "generic_binding_capabilities": [{
+    "token": "replace-with-a-secret",
+    "origin": "https://example.test",
+    "topic_uuid": "<binding-topic-uuid>",
+    "node_uuid": "<binding-node-uuid>",
+    "fields": ["text"],
+    "operations": ["read", "write", "react"],
+    "adoption": "hold"
+  }]
+}
+```
+
+The page loads `/sovereign-client.js`, calls
+`SovereignClient.connect({baseUrl, capability})`, and passes the returned
+client an ordinary input or textarea. The capability token belongs in runtime
+configuration or another secret-delivery path, never in a URL. `/binding-example`
+is the deliberately shell-free reference surface. `adoption` is the local
+user's choice: `hold` exposes reactions, while `auto` applies peer changes
+through the same Core adoption machinery before the field is refreshed.

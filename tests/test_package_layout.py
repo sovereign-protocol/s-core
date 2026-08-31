@@ -47,6 +47,24 @@ class PackageLayoutTests(unittest.TestCase):
             files("sovereign.assets").joinpath("shared-session.js").is_file(),
         )
         self.assertTrue(files("sovereign.assets").joinpath("manual.html").is_file())
+        self.assertTrue(
+            files("sovereign.assets").joinpath("sovereign-client.js").is_file(),
+        )
+        self.assertTrue(
+            files("sovereign.assets").joinpath("binding-example.html").is_file(),
+        )
+
+    def test_headless_binding_client_does_not_construct_the_shell(self):
+        client = files("sovereign.assets").joinpath(
+            "sovereign-client.js",
+        ).read_text(encoding="utf-8")
+        self.assertIn("SovereignClient", client)
+        self.assertIn("bindField", client)
+        self.assertIn("confirmedValue", client)
+        self.assertIn("pendingValue", client)
+        self.assertIn("SovereignUI.decorateTransition", client)
+        self.assertIn("SovereignUI.reactionControl", client)
+        self.assertNotIn("SovereignShell", client)
 
     def test_package_sources_live_under_the_declared_src_root(self):
         # Asserting where the imported module loaded from only holds for an
@@ -78,9 +96,32 @@ class PackageLayoutTests(unittest.TestCase):
             "reorderHandle", "reorderableList", "addComposer",
             "selectControl", "refreshSelect", "selectOptions",
             "selectionControl", "selectionField",
-            "actionMenu", "reactionControl",
+            "actionMenu", "actionButton", "reactionControl", "reactionPresentation",
+            "transitionMarker", "decorateTransition", "adoptionPolicyMarker",
+            "decorateAdoptionPolicy",
         ):
             self.assertIn(f"  {primitive}(", SHARED_JS)
+
+    def test_transition_projection_has_one_shared_visual_vocabulary(self):
+        shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
+            encoding="utf-8",
+        )
+        for marker in (
+            "ICON_ADOPT", "ICON_TAKE_BACK", "reactionPresentation",
+            "data-transition-stage", "data-transition-perspective",
+        ):
+            self.assertIn(marker, SHARED_JS + shared_css)
+        self.assertIn('options.density || "inline"', SHARED_JS)
+        self.assertIn('density: "review"', SHARED_JS)
+        self.assertIn(".ui-transition-marker", shared_css)
+        self.assertIn(".ui-transition-surface", shared_css)
+        self.assertIn('options.stages || ["in_flight"]', SHARED_JS)
+        self.assertIn("inset 4px 0 0", shared_css)
+        self.assertIn(
+            "var(--ui-transition-edge, var(--stage-transit-fill)) 0 8px",
+            shared_css,
+        )
+        self.assertIn("box-shadow: none", shared_css)
 
     def test_selection_fields_and_action_menus_have_distinct_shared_contracts(self):
         shared_css = files("sovereign.assets").joinpath("shared.css").read_text(
@@ -107,6 +148,10 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("select.ui-select-native", shared_css)
         self.assertIn("border: 1px solid var(--line", shared_css)
         self.assertIn("color-scheme: inherit", shared_css)
+        native = shared_css.split(
+            ".ui-select-control > select.ui-select-native {", 1,
+        )[1].split("}", 1)[0]
+        self.assertIn("max-width: none !important", native)
         self.assertIn("select.ui-select-native option", shared_css)
         self.assertIn("var(--surface, var(--panel, var(--shell-surface, Canvas)))", shared_css)
         self.assertIn(".ui-action-menu", shared_css)
@@ -147,6 +192,37 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("box-sizing: border-box", shared_css)
         self.assertIn("min-height: 32px", shared_css)
 
+    def test_one_dialog_makes_a_topic_wherever_it_is_made(self):
+        """Four copies of one form had already drifted apart.
+
+        Three in the Cockpit and one in S-Team, identical but for the noun -
+        and the S-Team one was the only place a snapshot file could not be
+        loaded. Nobody decided that; it is what a copy costs. The shape is
+        Core's now, so there is nowhere for the next drift to start.
+        """
+        dialog = SHARED_JS.split(
+            "openNewTopicDialog(options = {}) {", 1,
+        )[1].split("\n  },", 1)[0]
+        # A prefilled name turns "I did not type one" into a name somebody
+        # chose. Placeholder, never value.
+        self.assertIn('name.value = "";', dialog)
+        self.assertIn("name.placeholder = `Untitled ${noun}`", dialog)
+        # Nothing to start from and nothing required is not an empty menu,
+        # it is no question - and so is a kind that has no snapshot to read.
+        self.assertIn("!templates.length && !required", dialog)
+        self.assertIn("!options.snapshotType", dialog)
+
+    def test_a_loaded_snapshot_settles_what_a_topic_starts_from(self):
+        loader = SHARED_JS.split(
+            "async _loadSnapshotChoice(chosen) {", 1,
+        )[1].split("\n  },", 1)[0]
+        self.assertIn("s-protocol.item-snapshot", loader)
+        self.assertIn("state.options.snapshotType", loader)
+        self.assertIn("SNAPSHOT_FILE_LIMIT", loader)
+        # Disabled rather than quietly ignored: a select that goes on
+        # offering a choice the create call will not use is a lie.
+        self.assertIn("select.disabled = true", loader)
+
     def test_open_collaboration_pane_refreshes_with_polled_topic_state(self):
         refresh = SHARED_JS.split("refresh() {", 1)[1].split("},", 1)[0]
         self.assertIn("this.refreshCollaborationPane()", refresh)
@@ -157,11 +233,32 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn("this._renderAgenda()", pane_refresh)
         self.assertIn("agenda.contains(document.activeElement)", pane_refresh)
 
-    def test_transition_surface_separates_all_items_from_actionable_work(self):
-        self.assertIn("In transition", SHARED_JS)
-        self.assertIn("Nothing in transition.", SHARED_JS)
-        self.assertIn("`${mine} to review`", SHARED_JS)
-        self.assertNotIn("Current divergences", SHARED_JS)
+    def test_the_header_counts_only_what_a_decision_is_owed_on(self):
+        """One number, and it excludes what is merely travelling.
+
+        The bar used to carry three coloured bands - "to resolve", "to
+        review", "in transition". U7 replaced them with one count on one
+        control, and DESIGN_VOCABULARY.md fixes what it counts: a conflict,
+        or somebody else's change waiting for me. A count that includes what
+        you cannot act on is a count you learn to ignore.
+        """
+        refresh = SHARED_JS.split("refreshDisagreements() {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("const owed = conflicts + mine;", refresh)
+        self.assertIn('this._setCount("shellChangesBtn", owed, "Changes")', refresh)
+        # Travelling is still visible - it pulses rather than counting.
+        self.assertIn('changes.classList.toggle("is-moving", moving > 0)', refresh)
+        # The retired bands are gone from the surface entirely.
+        for retired in (
+            "In transition",
+            'text: "to resolve"',
+            'text: "to review"',
+            'text: "in transition"',
+            "Current divergences",
+        ):
+            self.assertNotIn(retired, SHARED_JS)
+        self.assertIn("No open changes.", SHARED_JS)
 
     def test_confirmed_snapshot_replaces_optimistic_projection_atomically(self):
         confirmation = SHARED_SESSION_JS.split(
@@ -185,6 +282,7 @@ class PackageLayoutTests(unittest.TestCase):
         self.assertIn('document.addEventListener("mousemove", move)', reorder)
         self.assertIn('document.addEventListener("mouseup", up)', reorder)
         self.assertIn('event.key !== previous && event.key !== next', reorder)
+        self.assertIn("item.dataset.reorderId = id", reorder)
         self.assertNotIn("row.draggable = true", agenda_row)
 
     def test_collaboration_selects_use_the_shared_option_population(self):
@@ -335,12 +433,119 @@ class ShellLayoutTests(unittest.TestCase):
         encoding="utf-8",
     )
 
-    def test_short_topic_titles_do_not_pull_the_menu_offscreen(self):
-        menu = self.SHARED_CSS.split(".shell-topic-menu {", 1)[1].split(
+    def test_the_bar_centres_the_topic_between_equal_flanks(self):
+        """The middle is the anchor, so it is centred and does not drift.
+
+        This was `1fr auto 1fr`, then `auto minmax(0, 1fr) auto` once the
+        middle held everything the topic was attached to and had to grow.
+        U7 moved that out into the switcher menu, so the middle shrinks to
+        its contents again - and with both flanks taking equal free space
+        the name sits at the optical centre and stays there as counts and
+        people arrive.
+        """
+        bar = self.SHARED_CSS.split("display: grid;", 1)[1].split("}", 1)[0]
+        self.assertIn(
+            "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)", bar,
+        )
+
+    def test_an_object_is_drawn_from_its_kind_and_nothing_else(self):
+        """The caller names the object; Core owns the drawing (U8).
+
+        `entityBadge` took an `icon` argument, and S-Team passed a key emoji
+        for a trusteeship, an open diamond for a role and a filled one for a
+        membership - three drawings chosen at three call sites for objects
+        Core already had names for. The argument is gone: one object has one
+        glyph because there is nowhere else for a second one to come from.
+        """
+        badge = SHARED_JS.split("entityBadge(options = {}) {", 1)[1].split(
+            "\n  disclosure(", 1,
+        )[0]
+        self.assertIn("entityGlyph(kind)", badge)
+        self.assertNotIn("options.icon", badge)
+        # Role, Seat and Members are the distinction S-Team's domain turns
+        # on - an office, that office filled, and people irrespective of
+        # office - so they are three drawings, not one.
+        for kind in ("team", "role", "seat", "trustee", "membership"):
+            self.assertIn(f"{kind}: ICON_", SHARED_JS)
+        # A section may carry the mark of the kind it holds, from the same
+        # table, so a heading and its contents cannot diverge.
+        disclosure = SHARED_JS.split("disclosure(title, options = {}) {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("options.glyph ? entityGlyph(options.glyph) : null", disclosure)
+
+    def test_the_name_clears_the_shared_field_min_height(self):
+        """`.ui-editable-text` floors at 34px, and min-height beats height.
+
+        Setting a height on the title in the bar therefore did nothing: it
+        rendered in a box a third taller than the row and out of line with
+        the mark beside it. Anything the bar shrinks has to clear the shared
+        primitive's `min-*` floors, not merely set its sizes.
+        """
+        title = self.SHARED_CSS.split(".shell-bar .shell-topic-title {", 1)[1].split(
             "}", 1,
         )[0]
-        self.assertIn("left: 0", menu)
-        self.assertNotIn("translateX", menu)
+        self.assertIn("min-height: 0", title)
+        self.assertIn("line-height:", title)
+
+    def test_title_links_are_local_navigation_only(self):
+        self.assertIn("/api/core/navigation/", SHARED_JS)
+        self.assertNotIn("Add to Cockpit", SHARED_JS)
+        self.assertNotIn("onFollow", SHARED_JS)
+        related = SHARED_JS.split("_buildRelatedMenu(button) {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("this._connectedDestinations()", related)
+        self.assertIn("Manage connections", related)
+
+    def test_connected_work_merges_with_navigation_links_not_beside_them(self):
+        """One row, one dialog, one menu - a topic connected both ways draws
+        once, as the richer connected-work fact, per DESIGN_NAVIGATION_LINKS.md."""
+        self.assertIn("/api/core/relationships/", SHARED_JS)
+        self.assertIn("Nothing connected yet.", SHARED_JS)
+        merge = SHARED_JS.split("_connectedDestinations() {", 1)[1].split(
+            "\n  },", 1,
+        )[0]
+        self.assertIn("item.held", merge)
+        self.assertIn("seen.has(item.topic_uuid)", merge)
+        dialog = SHARED_JS.split("_renderRelateDialog() {", 1)[1].split(
+            "\n  _relateHeading", 1,
+        )[0]
+        for heading in ("Connected work", "Already here", "Your other items"):
+            self.assertIn(heading, dialog)
+
+    def test_the_navigation_row_orders_destinations_by_range(self):
+        """Nearest first, widest last, with a rule where the range changes.
+
+        The row is the whole of U7's middle below the name: what this topic
+        names, then everything you hold. Only the names shrink - every
+        control after them is `flex: none`, so a long list truncates itself
+        rather than pushing the Cockpit off the bar.
+        """
+        row = SHARED_JS.split("_renderTopicContext() {", 1)[1].split(
+            "\n  _contextLink(link) {", 1,
+        )[0]
+        self.assertLess(
+            row.index("shell-context-links"), row.index("shell-related-menu"),
+        )
+        self.assertLess(
+            row.index("shell-related-menu"), row.index("shell-cockpit-btn"),
+        )
+        # The chevron is unconditional; the Cockpit is not, because an
+        # installation may register no aggregator.
+        self.assertIn('(app) => app.role === "aggregator"', row)
+        # And an aggregator draws no row at all - it already shows every
+        # topic, so a few of them on a line would be a second mesh.
+        self.assertIn('if (current && current.role === "aggregator") return;', row)
+        self.assertIn("if (!this._options.topicUuid || !this._topic()) return;", row)
+        links = self.SHARED_CSS.split(".shell-context-links {", 1)[1].split("}", 1)[0]
+        self.assertIn("min-width: 0", links)
+        self.assertIn("overflow: hidden", links)
+        # Hover brightens rather than emboldens: a weight change reflows the
+        # row and drags everything right of it sideways.
+        hover = self.SHARED_CSS.split(".shell-context-link:hover {", 1)[1].split("}", 1)[0]
+        self.assertIn("color:", hover)
+        self.assertNotIn("font-weight", hover)
 
 
 class ShippedExampleAssetTests(unittest.TestCase):
@@ -362,7 +567,7 @@ class ShippedExampleAssetTests(unittest.TestCase):
 
     def test_example_delegates_topic_creation_to_the_shell(self):
         self.assertNotIn("onCreateTopic", self.notes)
-        self.assertIn("SovereignShell.setTopicSelector", self.notes)
+        self.assertIn("SovereignShell.setTopicName", self.notes)
 
     def test_example_never_navigates_to_the_bare_root_with_a_query(self):
         # "/" serves whichever application is primary, so a root-relative link

@@ -287,9 +287,9 @@ class AppServerTests(unittest.TestCase):
         session.note_indirect_peer_topic("relay:B", topic.uuid)
         session.bind_peer_topic_channel("relay:B", topic.uuid, "mailbox")
         with session.lock:
-            session.application_metadata("kanban")["selected_board_uuid"] = (
-                "board-1"
-            )
+            session.application_metadata("initiative")[
+                "selected_initiative_uuid"
+            ] = "initiative-1"
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.json"
@@ -305,8 +305,10 @@ class AppServerTests(unittest.TestCase):
         )
         with loaded.lock:
             self.assertEqual(
-                loaded.application_metadata("kanban")["selected_board_uuid"],
-                "board-1",
+                loaded.application_metadata("initiative")[
+                    "selected_initiative_uuid"
+                ],
+                "initiative-1",
             )
 
 
@@ -649,6 +651,31 @@ class AppServerTests(unittest.TestCase):
 
         self.assertEqual(calls["count"], 1)
 
+    def test_drain_peer_update_hook_reconciles_core_bindings(self):
+        calls = {"count": 0}
+        persisted = []
+        session = Session("local")
+
+        class Bindings:
+            def reconcile_adoption(self):
+                calls["count"] += 1
+                return calls["count"] == 1
+
+        runtime = types.SimpleNamespace(
+            host=types.SimpleNamespace(
+                notify_peer_update=lambda: PeerUpdateOutcome(changed=False),
+            ),
+            binding_service=Bindings(),
+            session=session,
+            persist_confirmed_change=lambda kind: persisted.append(kind),
+        )
+
+        asyncio.run(app_server.drain_peer_update_hook(runtime, passes=4))
+
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(persisted, ["peer-reconciliation"])
+        self.assertEqual(session.current_view_revision(), 1)
+
     def test_channel_poll_tick_drains_adoption_hook_after_apply(self):
         # Regression (review A-4): relay-applied peer content only reached
         # the cache; adoption ran solely from UI polls and http p2p
@@ -789,10 +816,12 @@ class AppServerTests(unittest.TestCase):
             relay = RelayLogic(session, {})
             relay.calibrate_timing_if_due = lambda: None
             relay.write_presence = lambda: None
-            relay.poll_and_apply = lambda _after_apply=None: [
+            # A cycle hands its peer listing from the poll to the publication,
+            # so both stubs take it even though neither looks at it.
+            relay.poll_and_apply = lambda _after_apply=None, _listings=None: [
                 ("topic-1", "peer-b"),
             ]
-            relay.publish_due_topics = lambda: ["topic-1"]
+            relay.publish_due_topics = lambda _listings=None: ["topic-1"]
 
             result = relay.poll_once(lambda: None)
             records = [

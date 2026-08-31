@@ -4,3 +4,26 @@ Copyright 2026 Sovereign Protocol contributors
 Software is licensed under LGPL-3.0-or-later. Documentation and the normative
 S-Protocol specification are licensed under CC-BY-4.0. Executable fixtures and
 examples retain the repository software license unless stated otherwise.
+
+Third-party notices
+-------------------
+
+Interface icons. Several icon paths in src/sovereign/assets/shared.js are
+derived from, or follow the geometry of, two icon sets released under the MIT
+licence. The full licence text is in LICENSES/MIT.txt and applies to those
+paths only.
+
+  Feather (https://github.com/feathericons/feather)
+  Copyright (c) Cole Bemis
+  Derived paths: the close, chevron, expand, collapse, delete and share marks.
+
+  Tabler Icons (https://github.com/tabler/tabler-icons)
+  Copyright (c) Paweł Kuna
+  Followed geometry: the people mark, and the two-column board mark carried by
+  S-Initiative and reproduced in S-Cockpit.
+
+The remaining marks - the settings gear, the agenda, changes and remove
+glyphs, and the S-Team and S-Flow application marks - are original to this
+project and carry the repository licence. Where a mark merely resembles an
+upstream one because both are the obvious drawing of the same object, this
+notice is given as a precaution rather than as an admission of derivation.

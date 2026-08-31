@@ -1020,7 +1020,7 @@ class SessionTests(unittest.TestCase):
 
     def test_apply_peer_subtree_ignores_non_identity_roots(self):
         session = Session("si-a")
-        board = ProtocolNode({"type": "kanban_board", "name": "Board"})
+        board = ProtocolNode({"type": "initiative", "name": "Initiative"})
         board.refresh_hashes()
 
         session.apply_peer_subtree("http://addr-b", board, None)
@@ -1101,9 +1101,9 @@ class SessionTests(unittest.TestCase):
 
     # reconcile_peer_changes / accept_peer_node / peer_discusses_node -
     # generic peer-content reconciliation, generalized out of
-    # kanban_logic.py's adopt_incoming_changes. Deliberately exercised here
-    # with non-kanban node types ("note"/"note_item"/"leaf") to prove the
-    # mechanism carries no kanban-specific assumptions.
+    # S-Initiative's adopt_incoming_changes. Deliberately exercised here
+    # with node types no application owns ("note"/"note_item"/"leaf") to
+    # prove the mechanism carries no application-specific assumptions.
 
     def test_peer_discusses_node(self):
         session = Session("si-a")
@@ -1172,6 +1172,76 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(rolled_back.state_hash, peer_child.state_hash)
         self.assertEqual(rolled_back.base_hash, peer_child.base_hash)
         self.assertEqual(rolled_back.revision_origin, local_identity)
+
+    def test_rollback_restores_the_other_authors_revision_my_edit_replaced(self):
+        author = Session("si-a")
+        author_identity = author.identity.data["identity_key"]
+        topic = author.create_child(
+            author.protocol.root.uuid, {"type": "note", "name": "t"}, {},
+        ).value
+        child = author.create_child(
+            topic.uuid, {"type": "note_item", "text": "original"}, {},
+        ).value
+        published = ProtocolNode.from_dict(
+            author.protocol.index[topic.uuid].to_dict(),
+        )
+
+        local = Session("si-b")
+        local_identity = local.identity.data["identity_key"]
+        local.set_peer_identity_key("si-a", author_identity)
+        local.accept_topic_invitation(ProtocolNode.from_dict(published.to_dict()))
+        local.apply_peer_subtree(
+            "si-a", ProtocolNode.from_dict(published.to_dict()),
+            local.protocol.root.uuid,
+        )
+        local.modify(
+            child.uuid, {"type": "note_item", "text": "my edit"}, {},
+        )
+
+        event = next(
+            item for item in local.analyze_peer_transitions("si-a", topic.uuid)
+            if item["node_uuid"] == child.uuid
+        )
+        self.assertEqual(event["type"], "local_made_changes")
+        self.assertEqual(event["local_revision_origin"], local_identity)
+        self.assertEqual(event["peer_revision_origin"], author_identity)
+        self.assertEqual(
+            local.group_transition_events([event])[child.uuid]["reaction"],
+            "rollback",
+        )
+
+        result = local.rollback_peer_node("si-a", child.uuid)
+
+        self.assertEqual(result.status, "ok", result.reason)
+        restored = local.protocol.index[child.uuid]
+        self.assertEqual(restored.data["text"], "original")
+        self.assertEqual(restored.revision_origin, author_identity)
+
+    def test_rollback_absence_rejects_a_peer_target_that_still_exists(self):
+        local = Session("si-a")
+        local.identity
+        topic = local.create_child(
+            local.protocol.root.uuid, {"type": "note", "name": "t"}, {},
+        ).value
+        child = local.create_child(
+            topic.uuid, {"type": "note_item", "text": "original"}, {},
+        ).value
+        local.apply_peer_subtree(
+            "si-b",
+            ProtocolNode.from_dict(local.protocol.index[topic.uuid].to_dict()),
+            local.protocol.root.uuid,
+        )
+        local.modify(
+            child.uuid, {"type": "note_item", "text": "my edit"}, {},
+        )
+
+        result = local.rollback_peer_node(
+            "si-b", child.uuid, rollback_absence=True,
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("not absent", result.reason)
+        self.assertIn(child.uuid, local.protocol.index)
 
     def test_rollback_rejects_another_origins_revision(self):
         peer = Session("si-b")
@@ -1449,7 +1519,7 @@ class SessionTests(unittest.TestCase):
         # its whole subtree) - now the default in accept_peer_node, so no
         # adopt-mode hint is passed. The deeper "doesn't smuggle a
         # simultaneously-added child" property is covered end-to-end by the
-        # kanban auto-adopt tests in test_kanban_new_logic.py.
+        # initiative auto-adopt tests in test_initiative_new_logic.py.
         peer = Session("si-b")
         topic = peer.create_child(
             peer.protocol.root.uuid, {"type": "note", "name": "t"}, {},
@@ -1726,15 +1796,19 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(observer.agenda_projection(topic.uuid), [])
 
     def test_persistence_projection_drops_foreign_agenda_nodes(self):
-        author, observer, topic = self.perspective_pair()
+        """Grafting a topic brings the inviter's agenda; persisting drops it."""
+        author = Session("si-author")
+        observer = Session("si-observer")
+        author.identity
+        observer.identity
+        topic = author.create_child(
+            author.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
         item = author.create_agenda_item(topic.uuid, "Foreign").value
-        observer.apply_peer_subtree(
-            author.address,
+        observer.adopt_subtree(
             ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
             observer.protocol.root.uuid,
         )
-        adopted = observer.accept_peer_node(author.address, item.uuid)
-        self.assertEqual(adopted.status, "ok")
         self.assertIn(item.uuid, observer.protocol.index)
 
         persisted = ProtocolNode.from_dict(
@@ -1742,6 +1816,26 @@ class SessionTests(unittest.TestCase):
         )
 
         self.assertNotIn(item.uuid, Session._flatten_by_uuid(persisted))
+        # The container survives: it is the place, not the foreign content.
+        self.assertIn(
+            Session.agenda_container_uuid(topic.uuid),
+            Session._flatten_by_uuid(persisted),
+        )
+
+    def test_a_peer_agenda_item_is_never_adoptable(self):
+        """Core declares the rule on its own container, not every application."""
+        author, observer, topic = self.perspective_pair()
+        item = author.create_agenda_item(topic.uuid, "Foreign").value
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+
+        adopted = observer.accept_peer_node(author.address, item.uuid)
+
+        self.assertEqual(adopted.status, "error")
+        self.assertNotIn(item.uuid, observer.protocol.index)
 
     def test_agenda_move_never_rewrites_an_observed_item(self):
         local = Session("si-local")
@@ -1778,6 +1872,233 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(
             local.move_agenda_item(foreign.uuid, 0).status, "error",
         )
+
+    def test_agenda_containers_agree_without_being_adopted(self):
+        """Both sides derive the same container, so neither adopts the other's.
+
+        This is what lets a projection address a peer's agenda by uuid. The
+        two copies are authored independently and carry different timestamps
+        and signatures, but neither enters the content hash, so reconciliation
+        sees agreement rather than a change to decide about.
+        """
+        author, observer, topic = self.perspective_pair()
+        mine = observer.create_agenda_item(topic.uuid, "Mine").value
+        theirs = author.create_agenda_item(topic.uuid, "Theirs").value
+        container_uuid = Session.agenda_container_uuid(topic.uuid)
+
+        local_container = observer.protocol.index[container_uuid]
+        peer_container = author.protocol.index[container_uuid]
+        self.assertEqual(
+            local_container.content_hash, peer_container.content_hash,
+        )
+        self.assertNotEqual(
+            local_container.revision_signature,
+            peer_container.revision_signature,
+        )
+        self.assertEqual(
+            Session._classify_content(local_container, peer_container),
+            "in_agreement",
+        )
+
+        observer.apply_peer_subtree(
+            author.address,
+            ProtocolNode.from_dict(author.protocol.index[topic.uuid].to_dict()),
+            observer.protocol.root.uuid,
+        )
+        projected = observer.agenda_projection(topic.uuid, max_age_seconds=None)
+
+        self.assertEqual(
+            {item.uuid for item in projected}, {mine.uuid, theirs.uuid},
+        )
+
+    def test_ensure_container_is_idempotent_by_name(self):
+        session = Session("si-container")
+        session.identity
+        topic = session.create_child(
+            session.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+
+        first = session.ensure_container(topic.uuid, "comments")
+        second = session.ensure_container(topic.uuid, "comments")
+        other = session.ensure_container(topic.uuid, "attachments")
+
+        self.assertEqual(first.status, "ok", first.reason)
+        self.assertEqual(first.value.uuid, second.value.uuid)
+        self.assertNotEqual(first.value.uuid, other.value.uuid)
+        self.assertEqual(
+            session.ensure_container("missing-uuid", "comments").status, "error",
+        )
+
+    def test_container_children_are_ordered_without_naming_a_type(self):
+        """A container holds one kind, so its uuid says what the type used to."""
+        session = Session("si-ordering")
+        session.identity
+        topic = session.create_child(
+            session.protocol.root.uuid, {"type": "note", "name": "Topic"}, {},
+        ).value
+        container = session.ensure_container(topic.uuid, "comments").value
+        for text in ("first", "second"):
+            session.create_child(
+                container.uuid,
+                {
+                    "type": "comment",
+                    "text": text,
+                    "order": session.next_child_order(container.uuid),
+                },
+                {},
+            )
+
+        self.assertEqual(session.next_child_order(container.uuid), 2.0)
+        # The topic root still holds mixed kinds, so naming one still narrows.
+        self.assertEqual(session.next_child_order(topic.uuid), 1.0)
+        self.assertEqual(session.next_child_order(topic.uuid, "comment"), 0.0)
+
+    def test_group_transition_events_merges_deliveries_and_keeps_choices(self):
+        session = Session("si-transition-groups")
+        local_identity = session.identity.data["identity_key"]
+        shared = {
+            "node_uuid": "node-1",
+            "type": "peer_made_changes",
+            "stage": "awaiting_me",
+            "local_revision_origin": "peer-origin",
+            "local_revision": "local-revision",
+            "peer_revision_origin": "peer-origin",
+            "peer_revision": "peer-revision",
+        }
+        local_change = {
+            "node_uuid": "node-1",
+            "type": "local_made_changes",
+            "stage": "awaiting_peer",
+            "local_revision_origin": local_identity,
+            "local_revision": "new-local-revision",
+            "peer_revision_origin": local_identity,
+            "peer_revision": "old-local-revision",
+            "local_base_hash": "shared-base",
+            "peer_base_hash": "shared-base",
+            "peer_addr": "peer-c",
+        }
+
+        grouped = session.group_transition_events([
+            {**shared, "peer_addr": "peer-a"},
+            {**shared, "peer_addr": "peer-b"},
+            local_change,
+        ])
+
+        result = grouped["node-1"]
+        self.assertEqual(result["type"], "peer_made_changes")
+        self.assertEqual(len(result["events"]), 2)
+        self.assertEqual(
+            result["events"][0]["delivery_peer_addrs"],
+            ["peer-a", "peer-b"],
+        )
+        self.assertEqual(
+            {event["reaction"] for event in result["events"]},
+            {"adopt", "rollback"},
+        )
+        self.assertEqual(
+            {event["authored_locally"] for event in result["events"]},
+            {False, True},
+        )
+
+    def test_reaction_matrix_follows_relation_then_local_authorship(self):
+        session = Session("si-reaction-matrix")
+        mine = session.identity.data["identity_key"]
+        other = "other-identity"
+        cases = [
+            ({"type": "in_agreement"}, None),
+            ({
+                "type": "peer_made_changes",
+                "local_revision_origin": mine,
+                "peer_revision_origin": mine,
+                "local_base_hash": "base",
+                "peer_base_hash": "base",
+            }, "adopt"),
+            ({
+                "type": "local_missing_node",
+                "peer_revision_origin": mine,
+            }, "adopt"),
+            ({
+                "type": "local_made_changes",
+                "local_revision_origin": mine,
+                "peer_revision_origin": other,
+            }, "rollback"),
+            ({
+                "type": "local_made_changes",
+                "local_revision_origin": other,
+                "peer_revision_origin": other,
+            }, "adopt"),
+            ({
+                "type": "peer_missing_node",
+                "local_revision_origin": mine,
+            }, "rollback"),
+            ({
+                "type": "peer_missing_node",
+                "local_revision_origin": other,
+            }, "adopt"),
+            ({
+                "type": "divergence",
+                "local_revision_origin": mine,
+                "peer_revision_origin": other,
+                "local_base_hash": "base",
+                "peer_base_hash": "base",
+            }, "adopt"),
+            ({
+                "type": "divergence",
+                "local_revision_origin": mine,
+                "peer_revision_origin": mine,
+                "local_base_hash": "base",
+                "peer_base_hash": "base",
+            }, "rollback"),
+            ({
+                "type": "divergence",
+                "local_revision_origin": mine,
+                "peer_revision_origin": mine,
+                "local_base_hash": "local-base",
+                "peer_base_hash": "peer-base",
+            }, "adopt"),
+        ]
+
+        for event, expected in cases:
+            with self.subTest(event=event):
+                self.assertEqual(session.reaction_for_event(event), expected)
+
+    def test_grouping_deduplicates_one_target_despite_causal_classification(self):
+        session = Session("si-transition-target")
+        mine = session.identity.data["identity_key"]
+        common = {
+            "node_uuid": "node-1",
+            "local_revision_origin": mine,
+            "local_revision": "local-revision",
+            "peer_revision_origin": "author-a",
+            "peer_revision": "one-target-revision",
+            "local_base_hash": "base",
+            "peer_base_hash": "base",
+        }
+
+        result = session.group_transition_events([
+            {
+                **common,
+                "type": "local_made_changes",
+                "stage": "awaiting_peer",
+                "peer_addr": "peer-a",
+            },
+            {
+                **common,
+                "type": "peer_made_changes",
+                "stage": "awaiting_me",
+                "peer_addr": "peer-b",
+            },
+        ])["node-1"]
+
+        self.assertEqual(result["type"], "peer_made_changes")
+        self.assertEqual(result["reaction"], "adopt")
+        self.assertFalse(result["authored_locally"])
+        self.assertEqual(len(result["events"]), 1)
+        self.assertEqual(
+            result["events"][0]["delivery_peer_addrs"],
+            ["peer-a", "peer-b"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

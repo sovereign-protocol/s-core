@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Manual Perspective</title>
+    <link rel="stylesheet" href="/shared.css" />
     <link rel="stylesheet" href="/apps/protocol-explorer/styles.css" />
   </head>
   <body>
@@ -83,6 +84,7 @@
       </form>
     </dialog>
 
+    <script src="/shared.js"></script>
     <script>
       let appState = null;
       let selectedUuid = null;
@@ -294,11 +296,17 @@
 
         const actions = document.createElement("div");
         actions.className = "node-actions";
-        actions.append(iconButton("UUID", () => copyUuid(node.uuid)));
+        actions.append(manualButton("UUID", () => copyUuid(node.uuid)));
         if (mode === "local" && isUnderTopic(node.uuid) && hasPeerDifference(node)) {
-          actions.append(iconButton("Accept", () => openAcceptModal(node.uuid)));
+          actions.append(SovereignUI.actionButton({
+            label: "Adopt", iconKind: "adopt",
+            onActivate: () => openAdoptModal(node.uuid),
+          }));
         } else if (mode === "ghost") {
-          actions.append(iconButton("Accept", () => openAcceptModal(node.uuid)));
+          actions.append(SovereignUI.actionButton({
+            label: "Adopt", iconKind: "adopt",
+            onActivate: () => openAdoptModal(node.uuid),
+          }));
         }
 
         row.append(toggle, select, actions);
@@ -491,7 +499,7 @@
         return value;
       }
 
-      function openAcceptModal(nodeUuid) {
+      function openAdoptModal(nodeUuid) {
         const options = discussionMembers()
           .filter((member) => member !== appState.network.address)
           .map((member) => ({
@@ -502,10 +510,10 @@
           log("No peer version available", true);
           return;
         }
-        openModal("Accept Peer Version", [], async () => {
+        openModal("Adopt Peer Version", [], async () => {
           const selected = document.querySelector("input[name='peerChoice']:checked");
           if (!selected) throw new Error("Choose a peer");
-          await acceptPeerNode(selected.value, nodeUuid, selected.dataset.missing === "1");
+          await adoptPeerNode(selected.value, nodeUuid, selected.dataset.missing === "1");
         });
         const area = el("modalFields");
         area.replaceChildren();
@@ -526,13 +534,13 @@
         }
       }
 
-      async function acceptPeerNode(sourceAddr, nodeUuid, adoptAbsence = false) {
-        await api("/api/protocol-explorer/accept_peer_node", {
+      async function adoptPeerNode(sourceAddr, nodeUuid, adoptAbsence = false) {
+        await api("/api/protocol-explorer/adopt_peer_node", {
           source_addr: sourceAddr,
           node_uuid: nodeUuid,
           adopt_absence: adoptAbsence,
         });
-        log(`Accepted ${short(nodeUuid)} from ${sourceAddr}`);
+        log(`Adopted ${short(nodeUuid)} from ${sourceAddr}`);
         await loadState(true);
       }
 
@@ -578,7 +586,7 @@
         dialog.showModal();
       }
 
-      function iconButton(label, action) {
+      function manualButton(label, action) {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = label;

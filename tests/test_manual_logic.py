@@ -131,7 +131,7 @@ class ManualLogicTests(unittest.TestCase):
             self.assertIsNotNone(cached)
             self.assertEqual(cached.data["name"], "child")
 
-    def test_accept_peer_node_replaces_local_version(self):
+    def test_adopt_peer_node_replaces_local_version(self):
         left = Session("http://a")
         right = Session("http://b")
         logic = ManualLogic(left, {})
@@ -152,7 +152,7 @@ class ManualLogicTests(unittest.TestCase):
             right.root_uuid(),
         )
 
-        result = logic.accept_peer_node("http://b", local.uuid)
+        result = logic.adopt_peer_node("http://b", local.uuid)
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(left.protocol.index[local.uuid].data["name"], "peer")
@@ -166,7 +166,7 @@ class ManualLogicTests(unittest.TestCase):
             {},
         ).value
 
-        result = logic.accept_peer_node("http://b", node.uuid, adopt_absence=True)
+        result = logic.adopt_peer_node("http://b", node.uuid, adopt_absence=True)
 
         self.assertEqual(result.status, "ok")
         self.assertNotIn(node.uuid, session.protocol.index)

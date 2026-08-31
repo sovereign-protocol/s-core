@@ -155,6 +155,9 @@ class ExampleThroughTheHostTests(unittest.TestCase):
         self.assertIn("/api/example-notes/notes", paths)
         # Core's own routes must still be there alongside the application's.
         self.assertIn("/api/protocol", paths)
+        self.assertIn("/api/core/bindings/{node_uuid}", paths)
+        self.assertIn("/sovereign-client.js", paths)
+        self.assertIn("/binding-example", paths)
 
     def test_every_asset_referenced_by_the_installed_page_is_served(self):
         with tempfile.TemporaryDirectory() as tmp:

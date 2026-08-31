@@ -383,8 +383,8 @@ class CollaborationService:
     # A "bridge" is a topic's home channel, named by the topic that is on it
     # rather than by the channel itself. Applications create topics that
     # belong to other topics - an election belongs to the team that called
-    # it, a board to the team that keeps it - and those have to travel the
-    # same way as the thing they belong to, or they reach nobody. Without
+    # it, an initiative to the team that keeps it - and those have to travel
+    # the same way as the thing they belong to, or they reach nobody. Without
     # this an application could compose an invitation to a topic but never
     # give one a home, which is the one thing needed before an invitation is
     # possible at all.
