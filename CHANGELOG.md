@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.10 - 2026-08-31
 
 - **The header's "Connected" dialog now covers connected work, not only
   local shortcuts.** A new Core-owned `sovereign_relationship` connects one
