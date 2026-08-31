@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.9
+## Unreleased
 
 - **The header's "Connected" dialog now covers connected work, not only
   local shortcuts.** A new Core-owned `sovereign_relationship` connects one
@@ -274,6 +274,8 @@
   application previously had to remember to declare for `agenda_item`.
 - `_ordered_children` and `next_child_order` take `node_type` as optional.
   A container holds one kind, so its uuid says what the type used to.
+
+## 0.1.9
 
 - Added `Session.reconsider_adoption(topic_uuid)`: an application says its own
   settings changed and Core re-decides everything the topic is holding back —
